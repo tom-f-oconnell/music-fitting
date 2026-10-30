@@ -59,9 +59,15 @@ def test_demo_job_render_and_exports(client):
     assert not np.allclose(x, y) and float(resp2.headers["x-spectral-loss"]) != base_loss
 
     muted = client.post(f"/api/jobs/{job['id']}/render",
-                        json={"patches": r["patches"], "notes": notes, "muted_voices": [0]})
+                        json={"patches": r["patches"], "notes": notes, "muted_voices": [0], "mute_noise": True})
     z, _ = sf.read(io.BytesIO(muted.content))
     assert np.abs(z).max() == 0
+    # the fitted drums / noise floor stay in unless muted too
+    assert r["has_noise"]
+    only_noise = client.post(f"/api/jobs/{job['id']}/render",
+                             json={"patches": r["patches"], "notes": notes, "muted_voices": [0]})
+    w, _ = sf.read(io.BytesIO(only_noise.content))
+    assert np.abs(w).max() > 0
 
     midi = client.post("/api/midi", json={"notes": notes})
     assert midi.status_code == 200 and midi.content[:4] == b"MThd"

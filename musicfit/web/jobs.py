@@ -173,6 +173,10 @@ class JobManager:
             res = fit(target, cfg, verbose=False, progress=progress)
 
             save_audio(os.path.join(d, "fit.wav"), res.audio, cfg.sr)
+            if res.noise is not None:  # drums + noise floor, added to every re-render of the notes
+                with torch.no_grad():
+                    noise = res.noise.render(int(target.numel())).cpu()
+                sf.write(os.path.join(d, "noise.wav"), noise.numpy(), cfg.sr, subtype="FLOAT")
             if job.kind == "demo":
                 reference = {
                     "patch": true_params.describe(),
@@ -189,6 +193,8 @@ class JobManager:
                 "roll_notes": [n.as_dict() for n in res.roll_notes],
                 "final_loss": res.history[-1]["loss"],
                 "tuning_cents": res.tuning_cents,
+                "has_noise": res.noise is not None,
+                "drum_hits": [[k, round(t, 3), round(v, 3)] for k, t, v in res.noise.hits()] if res.noise else [],
                 "history": res.history,
                 "reference": reference,
             }
@@ -206,4 +212,11 @@ class JobManager:
 
     def target_audio(self, job_id: str) -> torch.Tensor:
         x, _ = sf.read(os.path.join(self.dir(job_id), "target.wav"), dtype="float32")
+        return torch.from_numpy(x)
+
+    def noise_audio(self, job_id: str) -> torch.Tensor | None:
+        path = os.path.join(self.dir(job_id), "noise.wav")
+        if not os.path.exists(path):
+            return None
+        x, _ = sf.read(path, dtype="float32")
         return torch.from_numpy(x)

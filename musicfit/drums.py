@@ -25,12 +25,14 @@ import torch.nn as nn
 from .synth import ParamSpec, _logit, _next_pow2
 
 KERNEL_SPECS = {
-    "noise_decay": ParamSpec(0.005, 1.0, 0.08, log=True),
+    # kept short and low: longer or higher tones and noise bursts could stand in for notes
+    "noise_decay": ParamSpec(0.005, 0.5, 0.08, log=True),
     "sweep_start": ParamSpec(60.0, 400.0, 150.0, log=True),
-    "sweep_end": ParamSpec(30.0, 150.0, 50.0, log=True),
+    "sweep_end": ParamSpec(30.0, 100.0, 50.0, log=True),
     "sweep_time": ParamSpec(0.003, 0.1, 0.03, log=True),
-    "tone_decay": ParamSpec(0.02, 0.8, 0.15, log=True),
+    "tone_decay": ParamSpec(0.02, 0.3, 0.15, log=True),
     "tone_level": ParamSpec(0.0, 1.0, 0.0),
+    "level": ParamSpec(0.01, 2.0, 0.3, log=True),  # peak of a full-strength hit
 }
 
 # initial kinds: (band-gain peak frequency in Hz, noise decay, tone level)
@@ -82,7 +84,7 @@ class NoiseVoice(nn.Module):
         return {k: spec.from_unit(torch.sigmoid(self.raw[k])) for k, spec in KERNEL_SPECS.items()}
 
     def kernels(self) -> torch.Tensor:
-        """One waveform per kind, [K, L]."""
+        """One waveform per kind, [K, L], with peak `level`."""
         p = self.values()
         K, L = self.kernel_noise.shape
         t = torch.arange(L, device=self.kernel_noise.device) / self.sr
@@ -92,7 +94,10 @@ class NoiseVoice(nn.Module):
         noise = noise * torch.exp(-t / p["noise_decay"][:, None])
         f = p["sweep_end"][:, None] + (p["sweep_start"] - p["sweep_end"])[:, None] * torch.exp(-t / p["sweep_time"][:, None])
         tone = torch.sin(2 * math.pi * torch.cumsum(f, dim=1) / self.sr) * torch.exp(-t / p["tone_decay"][:, None])
-        return noise + p["tone_level"][:, None] * tone
+        h = noise + p["tone_level"][:, None] * tone
+        # peak-normalised, so the band gains only shape the spectrum: loudness is hit strength x level,
+        # and the L1 penalty on hit strength cannot be dodged by turning the gains up
+        return h / (h.abs().amax(dim=1, keepdim=True) + 1e-8) * p["level"][:, None]
 
     def _floor(self, n_samples: int, device) -> torch.Tensor:
         if self._floor_noise is None or self._floor_noise.shape[0] < n_samples or self._floor_noise.device != device:

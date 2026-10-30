@@ -29,11 +29,13 @@ Then open http://localhost:8000.
   version, switching at the same position (space plays and stops).
 * **Tweak:** every patch parameter has a slider, which marks the fitted
   value; double-click resets it. Changes re-render within a second. Click a
-  note to mute it.
+  note to mute it. Drums and other unpitched sound are fitted separately and
+  stay in every re-render unless you tick *Mute drums & noise*.
 * **Export:** patch JSON (re-importable), MIDI, notes JSON, and the WAV.
 
-It works best on short, sparse synth lines. Dense real tracks are not fitted
-well yet (see [design.md](design.md#real-recordings)). A fit takes about a
+It works best on short, sparse synth lines. Real tracks fit much better than
+they did (tuning and drums are now handled) but still roughly: rich, detuned
+or acid timbres are the main gap (see [design.md](design.md#real-recordings)). A fit takes about a
 minute on an NVIDIA GPU, which is used automatically, and several minutes on
 a CPU. There is no login, so only run the app on your own machine.
 
@@ -46,13 +48,19 @@ python scripts/eval_synthetic.py --seeds 1-24 --out eval_out/base.json          
 python scripts/eval_synthetic.py --set prune_tol=0.005 --compare eval_out/base.json   # paired comparison
 ```
 
-`fit_audio.py` writes `target.wav`, `fit.wav`, `notes.mid`, `notes.json` and
-`params.json`. Options: `--sr`, `--pitch-min/--pitch-max` (MIDI), `--roll-steps`,
-`--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer spurious notes,
-lower if notes go missing), `--seed`, `--device` (`auto`, `cpu`, `cuda`, ...).
+`fit_audio.py` writes `target.wav`, `fit.wav`, `noise.wav` (the fitted drums
+alone), `notes.mid`, `notes.json` and `params.json` (patches, the estimated
+tuning, drum hits). Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
+`--roll-steps`, `--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer
+spurious notes, lower if notes go missing), `--drum-kinds` (unpitched sounds to
+fit, default 3; 0 for none), `--noise-floor`, `--seed`, `--device` (`auto`,
+`cpu`, `cuda`, ...). The recording's tuning offset from A440 is estimated
+automatically.
 `eval_synthetic.py` fits many synthetic targets (in parallel on a GPU, ~5 min
-for 24) with any `FitConfig` overrides (`--set field=value`); use it rather
-than single fits to judge a change (see [design.md](design.md#evaluation-on-synthetic-targets)).
+for 24) with any `FitConfig` overrides (`--set field=value`), optionally with
+things real recordings have and the synth can't make (`--mismatch
+tuning=25`, `unison`, `noise`, `drums`, `codec`); use it rather than single fits
+to judge a change (see [design.md](design.md#evaluation-on-synthetic-targets)).
 From Python, `musicfit.fit.fit(audio_tensor, FitConfig(...))`; `FitConfig`
 documents every knob.
 

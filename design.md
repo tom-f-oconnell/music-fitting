@@ -155,16 +155,105 @@ Tried and not kept (measured before the per-pitch gates):
 
 ## Real recordings
 
-A 4 s clip of Radiator (SAW II #2, 60 s in, 2 voices) does not fit: stage 1
-reaches a loss of 1.23, but the roll is a diffuse cloud of short (~40 ms)
-weak onsets (strongest cell 0.17–0.35, decode threshold 0.3), so decoding
-keeps 1–24 notes and stage 2 starts from a loss of 3.7–6.9 and ends near 2.9.
-Lower thresholds keep hundreds of notes. Per-pitch gate lengths did not
-change this. Most likely the sound (a pad, presumably with detuned or
-chorused oscillators and heavy reverb) is out of reach of one shared patch
-per voice, and the roll ends up painting the spectrogram instead. Real
-material probably needs richer voices (unison/detune, a filtered noise or
-drum voice) before the note-discovery stage can work on it.
+Why real tracks didn't fit, and what has been done about it. Clips: 4 s of
+aisatsana (40 s in; sparse piano), Cornish Acid (30 s; acid line + drums),
+produk 29 (60 s; synths + drums) and Radiator (60 s; pads), 2 voices each.
+No ground truth, so the measures are the loss (always the original MR-STFT
+loss), the loss right after the roll is decoded into notes, and how
+concentrated the roll is.
+
+**What went wrong.** Every clip ended at a loss of 2.0–2.7 (synthetic: ~0.7)
+with 1–16 notes, and decoding the roll cost a lot (stage-1 loss 1.0–1.5,
+right after decoding 5.1–7.0). On three clips the roll was a diffuse cloud of
+~40 ms blips (strongest cell 0.23–0.63; aisatsana, a sparse piano piece,
+0.33). Causes found:
+
+* **Tuning.** The tracks are off A440: aisatsana −19 cents, Cliffs −21,
+  produk 29 +24 (Radiator ~+46 and Cornish Acid ~0, both uncertain).
+  Stage 1's pitch rows were exactly on A440, so off-tuned notes smeared over
+  neighbouring rows; fine pitch only became free in stage 2.
+* **Drums and other unpitched sound**, which no voice could make, so they
+  became spurious or mistimed notes. On Cornish Acid the acid line *was* found
+  (strongest cell 0.98), but the drums kept the loss high.
+* **Rich, detuned timbres** (unison/chorus, pads).
+* Not the cause: the log-magnitude term chasing bins far below the peak.
+  84 % of aisatsana's log error is in bins < −60 dB re the peak, but putting
+  the log floor at −60 or −80 dB re the peak changed neither the rolls nor the
+  final losses.
+
+**A benchmark with ground truth.** `synthetic_target(mismatch=...)` (and
+`eval_synthetic.py --mismatch`) adds these to the synthetic targets, one at a
+time or together. Cost to the original fitter, F1 paired against the same
+24 clean targets (0.764):
+
+| mismatch | F1 | Δ |
+|---|---|---|
+| drums (kick + hat, −6 dB re the peak) | 0.564 | −0.200 ± 0.047 |
+| unison ±15 cents, random phases (with tuning estimation + noise voice, vs. clean 0.715) | 0.495 | −0.220 ± 0.035 |
+| unison ±15 cents, phases aligned | 0.656 | −0.108 ± 0.043 |
+| tuning +25 cents | 0.643 | −0.120 ± 0.045 |
+| noise floor −40 dB | 0.701 | −0.063 ± 0.038 |
+| tuning +45 cents | 0.722 | −0.042 ± 0.034 |
+| Opus 48 kbit/s | 0.756 | −0.008 ± 0.021 |
+| **combined** (tuning 25 + unison 15 + noise −40 + drums −6) | **0.069** | the real-clip failure, reproduced |
+
+**Fixes so far.**
+
+* **Tuning estimation** (`tuning.py`, `FitConfig.tuning_cents = "auto"`):
+  the magnitude-weighted circular mean of spectral-peak deviations from the
+  semitone grid, within 6 cents on every mismatch; the roll's rows are
+  shifted by it. Tuning +25: 0.643 → 0.757 (+0.114 ± 0.042); clean −0.018 ±
+  0.019; combined 0.069 → 0.178 (with phase-aligned unison; 0.138 with the
+  random-phase unison the benchmark now uses). Below a consistency of 0.2 (white noise
+  scores < 0.06) the grid stays at A440, as for Radiator and Cornish Acid.
+* **A noise/drum voice** (`drums.py`, `FitConfig.drum_kinds = 3`): drum kinds
+  replaying a fixed kernel (band-shaped noise burst + pitch-swept sine,
+  peak-normalised so loudness is hit strength × a bounded level) from their
+  own onset roll, under 5× the roll sparsity. With the drums in from the first
+  step it is a large win on the benchmark: drums 0.564 → 0.750–0.793
+  (+0.19–0.23), combined 0.178 → 0.35. On real clips it **takes over**: on
+  Cornish Acid the noise voice ends up making 100 % of the output (0 notes;
+  one kind became a 23 ms noise burst around 234 Hz fired on every acid note)
+  at a *lower* loss (1.66) than notes + drums (1.87) or notes alone (2.22). The
+  synth's acid timbre is poor enough (no glides or accents, approximate
+  resonance) that coarse band-shaped noise fits the log spectrum better.
+  Tighter kernels (tone ≤ 0.3 s ending ≤ 100 Hz, noise ≤ 0.5 s), up to 100×
+  the drum sparsity, the peak normalisation and a concave (√) penalty all
+  failed to stop it. What works is letting the drums join only after a part
+  of stage 1 (`drum_start`), so pitched content is found first: Cornish Acid
+  keeps 11–12 notes and produk 29 7–13, at lower losses than without drums.
+  But the synthetic drum gain then mostly disappears (+0.042 at 0.5, +0.053 at
+  0.25 vs. +0.186 from the start; drums learnt as notes in the first steps
+  are not handed back). The default is `drum_start = 0.25`, the safer choice
+  for real music; at it, clean targets score 0.736 (−0.028 ± 0.032 vs. no
+  fixes), drums 0.617 and combined 0.215 (0.138 with tuning estimation but no
+  drums, 0.348 with the drums in from the start). Resolving this trade-off needs
+  ground truth on real-sounding audio (see the plan).
+* A **stationary noise floor** (`noise_floor`, off) helped nowhere (noise −40
+  dB: −0.003; combined: none) and is left off.
+* **Unison** as amplitude modulation (three copies at ±Δ Hz sum to the
+  partial × (1 + 2 cos Δt)) was tried and removed: −0.046 on the unison
+  benchmark, +0.027 (n.s.) combined, −0.110 on clean targets. The fitted spread
+  gets almost no gradient near zero, and an initial spread adds beating that
+  then never goes away.
+
+**Plan, in order.**
+
+1. Ground truth on real-sounding audio, to settle trade-offs like the drum
+   curriculum that the synthetic benchmark gets wrong: e.g. BabySlakh (songs
+   rendered from MIDI with sampled instruments and drums, CC BY 4.0), fitting
+   its mixes and stems against the MIDI.
+2. Detuned / chorused timbres: now the largest remaining mismatch. Ideas: a
+   spread found by grid search rather than gradient (as the delay time
+   should be), incoherent copies with fixed random phases, or making the loss
+   less sensitive to beating (smoothing short-window magnitudes over time).
+3. A better acid/lead voice (glides, accent): the synth's weak timbres are
+   what lets the noise voice take over.
+4. Stage 2 losing ~2 % F1 (8 % recall) relative to the decoded roll.
+5. Optional external help, a decision for later: source separation (Demucs
+   installs fine) to fit pitched stems without the drums, and/or a pretrained
+   transcriber (basic-pitch needs a separate Python 3.11 venv) to start
+   stage 2 from its notes and to score real clips against.
 
 ## Dataset builder (`dataset/`)
 
@@ -216,9 +305,11 @@ with no build step; spectrograms are computed in the browser.
   within ±0.5 st in stage 2; glides and heavy pitch modulation are not
   modelled.
 * All notes in a voice share one patch; velocity only scales amplitude and
-  filter envelope depth. No unison/detune, no drum or filtered-noise voice.
+  filter envelope depth. No unison/detune or chorus.
+* Drum hits are fitted but only exported as a list (`params.json`, the web
+  job's `drum_hits`), not as MIDI; the web app has no sliders for them.
 * Stage 2 loses about 8 % recall that the decoded roll had (see above).
 * Echoes are still partly explained as notes (see above); the delay effect
   needs a better way back once it has been turned down.
 * High-resonance patches are fitted badly.
-* Real recordings do not survive the roll → notes decoding yet.
+* Real recordings: see "Real recordings" for what works now and what's next.

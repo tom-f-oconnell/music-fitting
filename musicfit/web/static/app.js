@@ -17,6 +17,7 @@ const S = {
   patches: null,   // current (tweaked) patches
   notes: null,     // [{pitch, onset, duration, velocity, voice, muted}]
   mutedVoices: new Set(),
+  muteNoise: false,
   voice: 0,
   buffers: {},     // target / fit / tweaked AudioBuffers
   specs2d: {},     // cached spectrograms
@@ -187,6 +188,9 @@ async function showResult(job) {
   S.patches = saved && saved.patches && saved.patches.length === r.patches.length ? saved.patches : JSON.parse(JSON.stringify(r.patches));
   S.notes = (saved && saved.notes) || r.notes.map((n) => ({ ...n, muted: false }));
   S.mutedVoices = new Set((saved && saved.mutedVoices) || []);
+  S.muteNoise = !!(saved && saved.muteNoise);
+  $("#noise-mute-wrap").hidden = !r.has_noise;
+  $("#noise-mute").checked = S.muteNoise;
   S.voice = 0;
   $("#result-view").hidden = false;
   $("#ref-legend").hidden = !r.reference;
@@ -221,7 +225,7 @@ function showMetrics() {
 }
 
 function persist() {
-  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, mutedVoices: [...S.mutedVoices] });
+  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, mutedVoices: [...S.mutedVoices], muteNoise: S.muteNoise });
 }
 
 // ---------------------------------------------------------------- sliders
@@ -332,7 +336,7 @@ async function renderTweaked() {
     const r = await api(`/api/jobs/${S.job.id}/render`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patches: S.patches, notes, muted_voices: [...S.mutedVoices] }),
+      body: JSON.stringify({ patches: S.patches, notes, muted_voices: [...S.mutedVoices], mute_noise: S.muteNoise }),
       signal: S.renderAbort.signal,
     });
     const loss = r.headers.get("X-Spectral-Loss");
@@ -643,10 +647,13 @@ function wire() {
     if (e.target.checked) S.mutedVoices.add(S.voice); else S.mutedVoices.delete(S.voice);
     drawRoll(); changed();
   };
+  $("#noise-mute").onchange = (e) => { S.muteNoise = e.target.checked; changed(); };
   $("#reset-btn").onclick = () => {
     S.patches[S.voice] = JSON.parse(JSON.stringify(S.fitted[S.voice]));
     S.notes = S.job.result.notes.map((n) => ({ ...n, muted: false }));
     S.mutedVoices.clear();
+    S.muteNoise = false;
+    $("#noise-mute").checked = false;
     buildSliders(); drawRoll(); showMetrics(); changed();
   };
 

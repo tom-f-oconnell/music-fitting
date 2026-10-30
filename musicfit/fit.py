@@ -47,8 +47,10 @@ class FitConfig:
     sparsity_warmup: float = 0.5  # fraction of roll_steps over which the L1 weight ramps up from 0
     decode_threshold: float = 0.3
     # unpitched sounds (drums.NoiseVoice): drum kinds triggered by an onset roll, and a noise floor
-    drum_kinds: int = 0
+    drum_kinds: int = 3
     noise_floor: bool = False
+    drum_sparsity: float = 5.0  # multiplies `sparsity` for the drum roll: hits should be few and strong
+    drum_start: float = 0.25  # fraction of roll_steps before the drums join (pitched content first; see design.md)
     # stage 2
     note_steps: int = 300
     note_lrs: dict = field(default_factory=lambda: {"onset": 0.003, "duration": 0.03, "velocity": 0.05, "detune": 0.02})
@@ -201,7 +203,7 @@ def fit(
         noise = NoiseVoice(n_frames, cfg.frame_hop_s, cfg.sr, cfg.drum_kinds, noise_floor=cfg.noise_floor,
                            generator=gen, seed=cfg.seed).to(device)
     render_noise = (lambda: noise.render(T)) if noise is not None else (lambda: 0.0)
-    noise_mass = (lambda: noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
+    noise_mass = (lambda: cfg.drum_sparsity * noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
 
     # ---- stage 1: soft piano roll -------------------------------------------
     opt = torch.optim.Adam(
@@ -211,11 +213,16 @@ def fit(
     )
     sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
     for step in range(cfg.roll_steps + 1):
-        pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + render_noise()
+        drums_on = noise is not None and step >= cfg.drum_start * cfg.roll_steps
+        pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + (render_noise() if drums_on else 0.0)
         spec = loss_fn(pred, target)
-        sparse = sum(r.strengths().sum(0).mean() for r in rolls) + noise_mass()  # mean active mass per frame
+        sparse = sum(r.strengths().sum(0).mean() for r in rolls)  # mean active mass per frame
         ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
         loss = spec + ramp * cfg.sparsity * sparse
+        if drums_on:
+            drum_mass = noise_mass()
+            sparse = sparse + drum_mass
+            loss = loss + ramp * cfg.sparsity * drum_mass
         report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec.item()})
         if step % cfg.log_every == 0 or step == cfg.roll_steps:
             _log(history, "roll", step, spec.item(), {"mass_per_frame": sparse.item()}, t0, verbose)

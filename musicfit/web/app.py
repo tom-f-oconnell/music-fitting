@@ -54,6 +54,7 @@ class RenderRequest(BaseModel):
     patches: list[dict]
     notes: list[dict]
     muted_voices: list[int] = []
+    mute_noise: bool = False  # leave out the fitted drums / noise floor
 
 
 class MidiRequest(BaseModel):
@@ -69,6 +70,10 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
     @functools.lru_cache(maxsize=8)
     def target_of(job_id: str):
         return jobs.target_audio(job_id)
+
+    @functools.lru_cache(maxsize=8)
+    def noise_of(job_id: str):
+        return jobs.noise_audio(job_id)
 
     def done_job(job_id: str):
         job = jobs.get(job_id)
@@ -172,6 +177,9 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
             raise HTTPException(422, f"expected {len(r['patches'])} patches")
         audio = render(req.patches, notes_from_dicts(req.notes), r["n_samples"], r["sr"], r["n_harmonics"],
                        set(req.muted_voices))
+        noise = None if req.mute_noise else noise_of(job_id)
+        if noise is not None:
+            audio = audio + noise[: audio.numel()]
         loss = spectral_loss(audio, target_of(job_id))
         return Response(wav_bytes(audio, r["sr"]), media_type="audio/wav",
                         headers={"X-Spectral-Loss": f"{loss:.5f}", "Access-Control-Expose-Headers": "X-Spectral-Loss"})

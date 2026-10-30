@@ -42,7 +42,8 @@ def synthetic_target(seed: int = 1, length_s: float = 3.0, n_notes: int = 10, sr
     and patch stay those of the seed; reference pitches stay integers):
 
       tuning: cents; every note shifted off the A440 semitone grid
-      unison: cents; three copies of each note at -x, 0, +x cents (supersaw style)
+      unison: cents; three copies of each note at -x, 0, +x cents (supersaw style), the
+              outer two shifted by a random 0-5 ms so their phases are not aligned
       noise:  dB re the peak; constant white noise floor (RMS)
       drums:  dB re the peak; kick on the beats, hi-hat on the off-beats (120 bpm)
       codec:  kbit/s; Opus encode/decode round trip through ffmpeg
@@ -57,14 +58,17 @@ def synthetic_target(seed: int = 1, length_s: float = 3.0, n_notes: int = 10, sr
     ref = random_melody(gen, n_notes, length_s)
     T = int(length_s * sr)
     pitch = torch.tensor([n.pitch for n in ref]) + m.get("tuning", 0.0) / 100
-    args = [torch.tensor([getattr(n, a) for n in ref]) for a in ("onset", "duration", "velocity")]
+    onset, duration, velocity = (torch.tensor([getattr(n, a) for n in ref]) for a in ("onset", "duration", "velocity"))
+    extra = torch.Generator().manual_seed(10_000 + seed)  # keeps the melody/patch stream untouched
     with torch.no_grad():
         if "unison" in m:
-            target = sum(synth.render_notes(pitch + c / 100, *args, T) for c in (-m["unison"], 0.0, m["unison"])) / 3
+            shifts = [0.005 * float(torch.rand((), generator=extra)) for _ in range(2)]
+            target = (synth.render_notes(pitch - m["unison"] / 100, onset + shifts[0], duration, velocity, T)
+                      + synth.render_notes(pitch, onset, duration, velocity, T)
+                      + synth.render_notes(pitch + m["unison"] / 100, onset + shifts[1], duration, velocity, T)) / 3
         else:
-            target = synth.render_notes(pitch, *args, T)
+            target = synth.render_notes(pitch, onset, duration, velocity, T)
     peak = float(target.abs().max())
-    extra = torch.Generator().manual_seed(10_000 + seed)  # keeps the melody/patch stream untouched
     if "drums" in m:
         drums = _drums(T, sr, extra)
         target = target + drums * peak * 10 ** (m["drums"] / 20) / float(drums.abs().max())
