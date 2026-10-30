@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+import subprocess
+
+import numpy as np
 import torch
 
 from .notes import Note
@@ -26,15 +30,74 @@ def random_melody(gen, n_notes, length_s, pitch_lo=45, pitch_hi=76, chord_prob=0
     return notes
 
 
-def synthetic_target(seed: int = 1, length_s: float = 3.0, n_notes: int = 10, sr: int = 16000):
-    """Returns (target audio, reference notes, true SynthParams)."""
+MISMATCHES = ("tuning", "unison", "noise", "drums", "codec")
+
+
+def synthetic_target(seed: int = 1, length_s: float = 3.0, n_notes: int = 10, sr: int = 16000,
+                     mismatch: dict | None = None):
+    """Returns (target audio, reference notes, true SynthParams).
+
+    mismatch adds things real recordings have and the fitter's synth cannot
+    produce exactly, to measure robustness with known ground truth (the melody
+    and patch stay those of the seed; reference pitches stay integers):
+
+      tuning: cents; every note shifted off the A440 semitone grid
+      unison: cents; three copies of each note at -x, 0, +x cents (supersaw style)
+      noise:  dB re the peak; constant white noise floor (RMS)
+      drums:  dB re the peak; kick on the beats, hi-hat on the off-beats (120 bpm)
+      codec:  kbit/s; Opus encode/decode round trip through ffmpeg
+    """
+    m = mismatch or {}
+    unknown = set(m) - set(MISMATCHES)
+    if unknown:
+        raise KeyError(f"unknown mismatch kinds: {sorted(unknown)}")
     gen = torch.Generator().manual_seed(seed)
     true_params = SynthParams.random(gen)
     synth = Synth(sr, params=true_params)
     ref = random_melody(gen, n_notes, length_s)
     T = int(length_s * sr)
+    pitch = torch.tensor([n.pitch for n in ref]) + m.get("tuning", 0.0) / 100
+    args = [torch.tensor([getattr(n, a) for n in ref]) for a in ("onset", "duration", "velocity")]
     with torch.no_grad():
-        target = synth.render_notes(
-            torch.tensor([n.pitch for n in ref]), torch.tensor([n.onset for n in ref]),
-            torch.tensor([n.duration for n in ref]), torch.tensor([n.velocity for n in ref]), T)
+        if "unison" in m:
+            target = sum(synth.render_notes(pitch + c / 100, *args, T) for c in (-m["unison"], 0.0, m["unison"])) / 3
+        else:
+            target = synth.render_notes(pitch, *args, T)
+    peak = float(target.abs().max())
+    extra = torch.Generator().manual_seed(10_000 + seed)  # keeps the melody/patch stream untouched
+    if "drums" in m:
+        drums = _drums(T, sr, extra)
+        target = target + drums * peak * 10 ** (m["drums"] / 20) / float(drums.abs().max())
+    if "noise" in m:
+        target = target + torch.randn(T, generator=extra) * peak * 10 ** (m["noise"] / 20)
+    if "codec" in m:
+        target = _opus_round_trip(target, sr, m["codec"])
     return target, ref, true_params
+
+
+def _drums(T: int, sr: int, gen: torch.Generator, beat_s: float = 0.5) -> torch.Tensor:
+    """Kick (pitch-swept sine) on every beat, short high-passed noise hi-hat half a beat later."""
+    out = torch.zeros(T)
+    t = torch.arange(T) / sr
+    for k in range(int(T / sr / beat_s) + 1):
+        for start, kind in ((k * beat_s, "kick"), ((k + 0.5) * beat_s, "hat")):
+            on = t >= start
+            tt = t[on] - start
+            if kind == "kick":
+                freq = 45.0 + 75.0 * torch.exp(-tt / 0.03)
+                hit = torch.sin(2 * math.pi * torch.cumsum(freq, 0) / sr) * torch.exp(-tt / 0.15)
+            else:
+                noise = torch.randn(len(tt) + 1, generator=gen)
+                hit = 0.4 * (noise[1:] - noise[:-1]) * torch.exp(-tt / 0.03)
+            out[on] += hit
+    return out
+
+
+def _opus_round_trip(x: torch.Tensor, sr: int, kbps: float) -> torch.Tensor:
+    common = ["ffmpeg", "-nostdin", "-v", "error"]
+    raw = ["-f", "f32le", "-ac", "1", "-ar", str(sr)]
+    enc = subprocess.run(common + raw + ["-i", "-", "-c:a", "libopus", "-b:a", f"{kbps}k", "-f", "ogg", "-"],
+                         input=x.numpy().astype(np.float32).tobytes(), capture_output=True, check=True).stdout
+    dec = subprocess.run(common + ["-i", "-"] + raw + ["-"], input=enc, capture_output=True, check=True).stdout
+    y = torch.from_numpy(np.frombuffer(dec, dtype=np.float32).copy())
+    return torch.nn.functional.pad(y, (0, max(0, x.numel() - y.numel())))[: x.numel()]

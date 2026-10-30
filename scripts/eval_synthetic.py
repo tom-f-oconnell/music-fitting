@@ -9,7 +9,11 @@ settings on many targets, paired by target:
         --compare eval_out/defaults.json --kinds
 
 --set overrides a FitConfig field; the value is parsed as JSON (--set sparsity=0.5,
---set roll_steps=150). Seed s renders synthetic target s and also seeds the fit.
+--set roll_steps=150). --mismatch adds something the synth can't produce to every
+target (tuning/unison in cents, noise/drums in dB re the peak, codec in kbit/s; see
+musicfit.synthetic.synthetic_target), e.g. --mismatch tuning=30 --mismatch noise=-40.
+Seed s renders synthetic target s (same melody and patch with or without
+mismatch) and also seeds the fit.
 Targets are fitted in parallel processes (--jobs: default 5 on a GPU, 1 on a CPU,
 where one fit already uses every core). 24 targets at the default settings take
 about 5 minutes on an RTX 3090.
@@ -40,10 +44,10 @@ from musicfit.synthetic import synthetic_target  # noqa: E402
 
 
 def fit_target(args) -> dict:
-    seed, overrides, length, n_notes, threads = args
+    seed, overrides, mismatch, length, n_notes, threads = args
     torch.set_num_threads(threads)
     cfg = FitConfig(seed=seed, **overrides)
-    target, ref, true_patch = synthetic_target(seed, length, n_notes, cfg.sr)
+    target, ref, true_patch = synthetic_target(seed, length, n_notes, cfg.sr, mismatch)
     t0 = time.time()
     res = fit(target, cfg, verbose=False)
     return {
@@ -106,6 +110,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", default="1-24", help="a range like 1-24, or one seed")
     ap.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE", help="override a FitConfig field")
+    ap.add_argument("--mismatch", action="append", default=[], metavar="KIND=VALUE",
+                    help="add tuning/unison/noise/drums/codec to the targets")
     ap.add_argument("--length", type=float, default=3.0, help="target length in seconds")
     ap.add_argument("--notes", type=int, default=10, help="notes per target (plus dyads)")
     ap.add_argument("--jobs", type=int, default=None, help="parallel fits (default 5 on a GPU, else 1)")
@@ -117,10 +123,11 @@ def main():
     lo, _, hi = args.seeds.partition("-")
     seeds = range(int(lo), int(hi or lo) + 1)
     overrides = {k: json.loads(v) for k, v in (s.split("=", 1) for s in args.set)}
+    mismatch = {k: float(v) for k, v in (s.split("=", 1) for s in args.mismatch)}
     on_gpu = torch.cuda.is_available() and overrides.get("device", "auto") != "cpu"
     jobs = args.jobs or (5 if on_gpu else 1)
     threads = max(1, (os.cpu_count() or 1) // jobs)
-    tasks = [(s, overrides, args.length, args.notes, threads) for s in seeds]
+    tasks = [(s, overrides, mismatch, args.length, args.notes, threads) for s in seeds]
 
     rows = []
     with mp.get_context("spawn").Pool(jobs) as pool:
@@ -153,8 +160,8 @@ def main():
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w") as f:
-            json.dump({"overrides": overrides, "length": args.length, "notes": args.notes, "mean": mean,
-                       "rows": rows}, f, indent=1)
+            json.dump({"overrides": overrides, "mismatch": mismatch, "length": args.length, "notes": args.notes,
+                       "mean": mean, "rows": rows}, f, indent=1)
 
 
 if __name__ == "__main__":

@@ -116,3 +116,22 @@ def test_fit_smoke_recovers_single_note():
     assert losses[-1] < losses[0]
     m = note_metrics(res.notes, [Note(64.0, 0.3, 0.4, 0.8)], onset_tol=0.06)
     assert m["recall"] == 1.0
+
+
+def test_synthetic_mismatch_keeps_melody_and_sets_levels():
+    from musicfit.synthetic import synthetic_target
+
+    clean, ref, _ = synthetic_target(9, length_s=2.0)
+    same, ref2, _ = synthetic_target(9, length_s=2.0, mismatch={})
+    assert torch.equal(clean, same) and ref == ref2
+    peak = float(clean.abs().max())
+    noisy, ref3, _ = synthetic_target(9, length_s=2.0, mismatch={"noise": -40})
+    assert ref3 == ref
+    assert abs(20 * torch.log10((noisy - clean).pow(2).mean().sqrt() / peak) + 40) < 0.5
+    drums, _, _ = synthetic_target(9, length_s=2.0, mismatch={"drums": -6})
+    assert abs(20 * torch.log10((drums - clean).abs().max() / peak) + 6) < 0.1
+    coded, _, _ = synthetic_target(9, length_s=2.0, mismatch={"codec": 64})
+    assert coded.shape == clean.shape
+    assert float((coded - clean).pow(2).sum() / clean.pow(2).sum()) < 0.05  # aligned, small coding error
+    tuned, _, _ = synthetic_target(9, length_s=2.0, mismatch={"tuning": 30})
+    assert not torch.allclose(tuned, clean)
