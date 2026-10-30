@@ -150,21 +150,28 @@ There is no authentication: run it locally or behind something that adds it.
    curated hardcoded list as fallback (`aphex_twin_catalog.py`: SAW 85–92,
    SAW II, …I Care Because You Do, Richard D. James Album, Drukqs, Syro; EPs
    Come to Daddy, Windowlicker, CCAI pt2, Cheetah, Collapse, Blackbox Life
-   Recorder). Works are de-duplicated by a normalised title (case/accents,
-   "(2019 Remaster)"-style suffixes, punctuation), so re-issues collapse into
+   Recorder; durations taken from MusicBrainz). Release names are matched
+   loosely ("Cheetah EP" = "Cheetah", "pt2" = "Part 2"), and singles are
+   searched too, since MusicBrainz types Windowlicker as one. Works are
+   de-duplicated by a normalised title (case/accents, "(2019 Remaster)"-style
+   suffixes, Syro "[120.2]" bpm tags, punctuation), so re-issues collapse into
    one work.
 2. **Search** – `ytsearch8:"Aphex Twin <title>"` through yt-dlp (metadata
-   only), also under aliases such as the SAW II "#3" names.
+   only), then under aliases (the SAW II "#n" names the official uploads use,
+   etc.) unless an official upload was already found.
 3. **Choose** – candidates are scored: the title must contain the work title
    as a phrase, duration within 8 % (min 6 s) of the catalogue duration,
-   official / "Topic" uploads preferred, and covers, remixes, live, slowed,
-   reaction, "full album" videos etc. rejected (unless the work's own title
-   contains that word, e.g. "Come to Daddy (Pappy Mix)").
-4. **Download** – best audio stream → ffmpeg → `audio/<Artist>_<Title>.opus`.
+   official / label / "Topic" uploads preferred, and covers, remixes, live,
+   slowed, 432 Hz re-tunes, reaction, "full album" videos etc. rejected
+   (unless the work's own title contains that word, e.g. "Come to Daddy
+   (Pappy Mix)").
+4. **Download** – best audio stream → ffmpeg → `audio/<Artist>_<Title>.opus`
+   (the 48 kHz Opus stream is kept as is).
 5. **Manifest** – `manifest.jsonl`, one line per work with status
    (`ok | not_found | duplicate_video | download_failed | skipped`), chosen
    video, uploader, durations, file and the scored candidate list. A video id
-   already in the manifest is never downloaded twice, and re-running resumes.
+   already in the manifest is never downloaded twice, and re-running resumes
+   (a real run after `--dry-run` downloads the dry run's picks).
 
 ```
 python scripts/build_aphex_twin_dataset.py --out data/aphex_twin                 # MusicBrainz → download
@@ -176,7 +183,9 @@ python scripts/build_aphex_twin_dataset.py --out data/aphex_twin --all-releases 
 
 `--cookies` (a Netscape `cookies.txt` exported from a logged-in browser) is
 the standard workaround when YouTube answers "Sign in to confirm you're not a
-bot" from data-centre IPs. Downloading copyrighted music is subject to
+bot", typically from data-centre IPs (not needed from a home connection).
+Searches containing "Cock" return nothing on YouTube, so Cock/Ver10 is
+searched as "Ver10". Downloading copyrighted music is subject to
 YouTube's terms and local law; this code is for personal research use.
 
 ## Tests
@@ -220,12 +229,13 @@ the MIDI writer and a tiny end-to-end fit.
 * **Unit tests**: 19 pass (`python -m pytest`), including the full
   search → choose → download → manifest loop against a mocked YouTube client
   and web API tests (demo job, upload job, re-render, mute, MIDI, bad input).
-* **Not run**: real YouTube downloads and the live MusicBrainz query. The
-  sandbox this was built in has no network route to youtube.com or
-  musicbrainz.org, so `build_aphex_twin_dataset.py` has only been exercised
-  with mocks; the curated catalogue path and the manifest/dedup logic are
-  what the tests cover. Run it on a machine with normal internet access
-  (expect YouTube to ask for `--cookies` from a data-centre IP).
+* **Dataset, live** (October 2026, home connection, no cookies): MusicBrainz
+  gives 149 distinct works for the six albums + six EPs. A full `--dry-run`
+  picks a video for 145 of them, no video twice, 132 from the official
+  channel or label (all 24 SAW II tracks as the official "#n" uploads, every
+  pick within ~3 s of the MusicBrainz length). The 4 misses are the
+  Blackbox "omc" mixes, which are only on YouTube as slowed fan edits. Real
+  downloads (yt-dlp → `.opus`) were run for the first two works only.
 * **Not yet done**: fitting a real recording end to end. `fit_audio.py` is
   wired up (ffmpeg decode → fit → wav/MIDI/JSON) but real tracks will need
   more voices, a drum/noise voice, and longer runs than the demo; treat the

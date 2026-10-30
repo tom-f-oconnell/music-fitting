@@ -51,6 +51,7 @@ _PAREN_NOISE = re.compile(
     re.I,
 )
 _BRACKET_NOISE = re.compile(r"\[(?:remaster(?:ed)?|official (?:audio|video)|hd|hq)[^\]]*\]", re.I)
+_TEMPO = re.compile(r"\[\d{2,3}(?:\.\d+)?\]")  # Syro-style "[120.2]" bpm tags, absent on MusicBrainz
 _ARTIST_PREFIX = re.compile(r"^(?:aphex twin|afx|polygon window|caustic window|the tuss)\s*[-–—:]\s*", re.I)
 
 
@@ -68,9 +69,20 @@ def normalize_title(title: str) -> str:
     t = _ARTIST_PREFIX.sub("", t)
     t = _PAREN_NOISE.sub("", t)
     t = _BRACKET_NOISE.sub("", t)
+    t = _TEMPO.sub("", t)
     t = t.replace("&", " and ")
     t = re.sub(r"[^a-z0-9]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def release_key(title: str) -> str:
+    """Looser key for matching release names across sources.
+
+    On top of :func:`normalize_title`, "pt2"/"pt 2" becomes "part 2" and a
+    trailing "EP"/"E.P." is dropped, so "Cheetah EP" matches "Cheetah".
+    """
+    t = re.sub(r"\bpt ?(\d+)", r"part \1", normalize_title(title))
+    return re.sub(r"(?: e ?p)+$", "", t)
 
 
 def dedupe_works(works: list[Work]) -> list[Work]:
@@ -161,17 +173,30 @@ def musicbrainz_tracks(
     client: MusicBrainz | None = None,
     verbose: bool = True,
 ) -> list[Work]:
-    """All tracks of an artist's official albums (and EPs) from MusicBrainz."""
+    """All tracks of an artist's official albums (and EPs) from MusicBrainz.
+
+    With an explicit ``albums`` list, release names are matched with
+    :func:`release_key`, and singles are searched too (some EPs, e.g.
+    "Windowlicker", are typed as singles on MusicBrainz).  When several release
+    groups match one name, only the first album, else EP, else single is used.
+    """
     mb = client or MusicBrainz()
     aid = mb.artist_id(artist)
-    wanted = {normalize_title(a) for a in albums} if albums else None
+    wanted = {release_key(a) for a in albums} if albums else None
     works: list[Work] = []
-    groups = mb.release_groups(aid, ("album", "ep") if include_eps else ("album",))
+    types = ("album", "ep") if include_eps else ("album",)
+    if wanted is not None and include_eps:
+        types += ("single",)
+    rank = {"Album": 0, "EP": 1, "Single": 2}
+    groups = sorted(mb.release_groups(aid, types), key=lambda g: rank.get(g.get("primary-type"), 3))
+    done: set[str] = set()
     for g in groups:
         if "secondary-types" in g and g["secondary-types"]:
             continue  # skip live / compilation / remix / soundtrack groups
-        if wanted is not None and normalize_title(g["title"]) not in wanted:
+        key = release_key(g["title"])
+        if wanted is not None and (key not in wanted or key in done):
             continue
+        done.add(key)
         rel = mb.best_release(g["id"])
         if rel is None:
             continue

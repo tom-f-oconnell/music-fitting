@@ -37,8 +37,9 @@ REJECT_WORDS = (
     "tutorial", "remake", "recreat", "how to", "bootleg", "mashup", "instrumental", "karaoke", "lyrics",
     "piano version", "guitar", "sample", "breakdown", "analysis", "full album", "mix)", " mix ", "megamix",
     "vinyl rip", "loop", "1 hour", "10 hours", "extended", "flip",
+    "432hz", "432 hz", "528hz", "528 hz", "bass boosted", "pitched",  # re-tuned / processed re-uploads
 )
-PREFERRED_UPLOADERS = ("aphex twin", "warp records", "warprecords", " - topic")
+PREFERRED_UPLOADERS = ("aphex twin", "warp records", "warprecords", "r&s records", " - topic")
 
 
 @dataclass
@@ -120,12 +121,16 @@ def score_candidate(work: Work, cand: Candidate, duration_tol: float = 0.08, min
     elif cand.duration_s is None:
         score -= 0.5
 
-    up = (cand.uploader or "").lower()
-    if any(p in up for p in PREFERRED_UPLOADERS):
+    if is_preferred_uploader(cand):
         score += 2.0
     if cand.view_count:
         score += min(cand.view_count, 10_000_000) / 10_000_000  # small tie-breaker
     return score
+
+
+def is_preferred_uploader(cand: Candidate) -> bool:
+    up = (cand.uploader or "").lower()
+    return any(p in up for p in PREFERRED_UPLOADERS)
 
 
 def choose_candidate(work: Work, candidates: list[Candidate], **kw) -> tuple[Candidate | None, float]:
@@ -158,7 +163,8 @@ class YouTubeClient:
         self.extra_opts = extra_opts or {}
 
     def _opts(self, **more) -> dict:
-        opts = {"quiet": self.quiet, "no_warnings": self.quiet, "noplaylist": True, "ignoreerrors": True}
+        opts = {"quiet": self.quiet, "no_warnings": self.quiet, "noprogress": self.quiet, "noplaylist": True,
+                "ignoreerrors": True}
         if self.cookies_file:
             opts["cookiefile"] = self.cookies_file
         opts.update(self.extra_opts)
@@ -248,10 +254,9 @@ def build_dataset(
 
     for i, work in enumerate(works, start=1):
         prev = manifest.entries.get(work.key)
-        if prev is not None and (prev.status == "ok" or (prev.status != "download_failed" and not retry_failed)
-                                 or (prev.status == "download_failed" and not retry_failed)):
-            if not dry_run:
-                continue
+        # "skipped" entries are picks from an earlier dry run: always (re)process those
+        if prev is not None and (prev.status == "ok" or (prev.status != "skipped" and not retry_failed)):
+            continue
         label = f"[{i}/{len(works)}] {work.artist} - {work.title}"
         entry = ManifestEntry(work.key, work.title, work.artist, work.album, work.duration_s, status="not_found")
         try:
@@ -260,8 +265,8 @@ def build_dataset(
             for q in queries:
                 candidates += client.search(q, n_search)
                 best, score = choose_candidate(work, candidates, duration_tol=duration_tol)
-                if best is not None and score >= 2.0:
-                    break
+                if best is not None and is_preferred_uploader(best):
+                    break  # else an alias (SAW II "#n") may still find the official upload
             # dedupe candidates by id, keep for the record
             uniq = {c.video_id: c for c in candidates}
             best, score = choose_candidate(work, list(uniq.values()), duration_tol=duration_tol)
@@ -298,7 +303,7 @@ def build_dataset(
             entry.status, entry.error = "download_failed", f"{type(e).__name__}: {e}"
             if verbose:
                 print(f"{label}: search failed: {entry.error}")
-        if not dry_run or prev is None:
+        if not dry_run or prev is None or prev.status == "skipped":
             manifest.add(entry)
         if client.sleep_between and not dry_run:
             time.sleep(client.sleep_between)

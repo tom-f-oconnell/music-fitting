@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from musicfit.dataset.aphex_twin_catalog import ALBUMS, curated_works  # noqa: E402
-from musicfit.dataset.catalog import Work, dedupe_works, normalize_title  # noqa: E402
+from musicfit.dataset.catalog import Work, dedupe_works, musicbrainz_tracks, normalize_title, release_key  # noqa: E402
 from musicfit.dataset.youtube import Candidate, Manifest, build_dataset, choose_candidate, score_candidate  # noqa: E402
 
 
@@ -19,6 +19,52 @@ def test_normalize_title():
     assert normalize_title("Xtal") == normalize_title("XTAL ")
     # content that distinguishes works is kept
     assert normalize_title("Come to Daddy (Pappy Mix)") != normalize_title("Come to Daddy (Mummy Mix)")
+
+
+def test_release_key_and_tempo_tags():
+    assert release_key("Cheetah EP") == release_key("Cheetah") == "cheetah"
+    assert release_key("Computer Controlled Acoustic Instruments pt2") == \
+        release_key("Computer Controlled Acoustic Instruments, Part 2")
+    assert release_key("Ventolin E.P.") == "ventolin"
+    assert release_key("Deep") == "deep"
+    # Syro bpm tags are on YouTube but not on MusicBrainz
+    assert normalize_title("minipops 67 [120.2][source field mix]") == normalize_title("minipops 67 (source field mix)")
+    assert normalize_title("produk 29 [101]") == "produk 29"
+
+
+class FakeMusicBrainz:
+    def __init__(self, groups, releases):
+        self.groups, self.releases = groups, releases
+        self.fetched = []
+
+    def artist_id(self, name):
+        return "aid"
+
+    def release_groups(self, artist_mbid, types=("album", "ep")):
+        return [g for g in self.groups if g["primary-type"].lower() in types]
+
+    def best_release(self, gid):
+        self.fetched.append(gid)
+        tracks = [{"title": t, "length": 1000 * d, "position": i} for i, (t, d) in enumerate(self.releases[gid], 1)]
+        return {"date": "1999", "media": [{"tracks": tracks}]}
+
+
+def test_musicbrainz_tracks_matches_singles_and_ep_suffixes():
+    groups = [
+        {"id": "s1", "title": "Come to Daddy", "primary-type": "Single", "secondary-types": []},
+        {"id": "e1", "title": "Come to Daddy", "primary-type": "EP", "secondary-types": []},
+        {"id": "s2", "title": "Windowlicker", "primary-type": "Single", "secondary-types": []},
+        {"id": "e2", "title": "Cheetah EP", "primary-type": "EP", "secondary-types": []},
+        {"id": "c1", "title": "Cheetah", "primary-type": "Album", "secondary-types": ["Compilation"]},
+        {"id": "e3", "title": "Analord 10", "primary-type": "EP", "secondary-types": []},
+    ]
+    releases = {"s1": [("Come to Daddy (Pappy Mix)", 262)], "e1": [("Come to Daddy (Pappy Mix)", 262), ("Flim", 177)],
+                "s2": [("Windowlicker", 367)], "e2": [("CHEETAHT2 [Ld spectrum]", 337)], "c1": [], "e3": []}
+    mb = FakeMusicBrainz(groups, releases)
+    works = musicbrainz_tracks("Aphex Twin", albums=["Come to Daddy", "Windowlicker", "Cheetah"], client=mb,
+                               verbose=False)
+    assert sorted(mb.fetched) == ["e1", "e2", "s2"]  # EP preferred over the same-named single
+    assert {w.key for w in works} == {"come to daddy pappy mix", "flim", "windowlicker", "cheetaht2 ld spectrum"}
 
 
 def test_dedupe_works_merges_rereleases():
@@ -57,9 +103,11 @@ def test_score_candidate_prefers_official_and_rejects_covers():
     slowed = Candidate("d", "Aphex Twin - Avril 14th (slowed + reverb)", 140, uploader="x")
     wrong_len = Candidate("e", "Avril 14th", 600, uploader="x")
     other = Candidate("f", "Aphex Twin - Flim", 177, uploader="Aphex Twin - Topic")
+    retuned = Candidate("g", "Aphex Twin - Avril 14th (432hz)", 125, uploader="x")
     assert score_candidate(w, official) > score_candidate(w, fan) > 0
     assert score_candidate(w, cover) <= 0
     assert score_candidate(w, slowed) <= 0
+    assert score_candidate(w, retuned) <= 0
     assert score_candidate(w, wrong_len) <= 0
     assert score_candidate(w, other) <= 0
     best, _ = choose_candidate(w, [fan, cover, official, slowed, wrong_len, other])
@@ -142,6 +190,22 @@ def test_build_dataset_dedupes_videos_and_is_incremental(tmp_path):
     assert Manifest(str(out / "manifest.jsonl")).downloaded_video_ids() == {"v1", "v2", "v3"}
 
 
+def test_alias_search_runs_unless_official_upload_found(tmp_path):
+    works = [Work("Lichen", "Aphex Twin", "SAW II", 255.0, aliases=["#20"]),
+             Work("Xtal", "Aphex Twin", "SAW", 291.0, aliases=["Crystal"])]
+    results = {
+        "Aphex Twin Lichen": [Candidate("fan", "Aphex Twin - Lichen", 256, uploader="someone")],
+        "Aphex Twin #20": [Candidate("off", "#20", 256, uploader="Aphex Twin")],
+        "Aphex Twin Xtal": [Candidate("v1", "Xtal", 291, uploader="Aphex Twin - Topic")],
+    }
+    client = FakeClient(results)
+    searched = []
+    client.search = lambda q, n=8: searched.append(q) or results.get(q, [])
+    m = build_dataset(works, str(tmp_path), client, verbose=False)
+    assert m.entries["lichen"].video_id == "off"
+    assert searched == ["Aphex Twin Lichen", "Aphex Twin #20", "Aphex Twin Xtal"]  # no alias search for Xtal
+
+
 def test_dry_run_downloads_nothing(tmp_path):
     works = [Work("Xtal", "Aphex Twin", "SAW", 294.0)]
     client = FakeClient({"Aphex Twin Xtal": [Candidate("v1", "Xtal", 294)]})
@@ -149,6 +213,11 @@ def test_dry_run_downloads_nothing(tmp_path):
     assert client.downloads == []
     assert m.entries["xtal"].status == "skipped"
     assert m.entries["xtal"].video_id == "v1"
+
+    # a real run after the dry run downloads the picks
+    m = build_dataset(works, str(tmp_path), client, verbose=False)
+    assert client.downloads == ["v1"]
+    assert m.entries["xtal"].status == "ok"
 
 
 @pytest.mark.network
