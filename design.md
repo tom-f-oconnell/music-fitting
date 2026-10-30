@@ -87,26 +87,36 @@ pitch rounds equal and the onset is within 50 ms.
 Single runs are not a reliable measure: fits on the GPU are not
 deterministic (CUDA's linear-interpolation backward uses atomic adds) and the
 optimisation is chaotic, so one target fitted twice with the same settings
-gave F1 0.74 and 0.89. Compare settings on many targets, paired by target:
-24 targets (seeds 1–24), Standard steps (400 + 300):
+gave F1 0.74 and 0.89. Even the mean over 24 targets moves between identical
+runs: three runs of the current defaults gave 0.757, 0.715 and 0.764. So
+compare settings on many targets, paired by target, and treat differences
+below ~0.05 between single 24-target runs as noise.
+`scripts/eval_synthetic.py` does this (`--compare` for the paired difference,
+`--kinds` for the breakdown of spurious notes below). 24 targets (seeds 1–24),
+Standard steps (400 + 300):
 
 | setting | precision | recall | F1 | final loss |
 |---|---|---|---|---|
 | original fitter (shared gate length, no stage-2 penalty, no pruning) | 0.47 | 0.81 | 0.571 | 0.986 |
 | + λ₂ = 3 and leave-one-out pruning at `prune_tol` = 0.01 | 0.60 | 0.81 | 0.670 | 0.947 |
-| + a gate length per pitch row (current defaults) | 0.76 | 0.77 | 0.757 | 0.976 |
+| + a gate length per pitch row (current defaults) | 0.71–0.76 | 0.73–0.78 | 0.715–0.764 | 0.96–0.98 |
 
-Paired per target, pruning gains +0.099 ± 0.032 (SE) F1 (better on 18 of 24
-targets) and the per-pitch gates another +0.086 ± 0.032 (better on 16).
+The first row is commit 5534654, the second was measured on code between
+5534654 and 92ef47a (pruning without per-pitch gates), the third is the
+current code over three runs. In single paired runs, pruning gained
++0.099 ± 0.032 (SE) F1 (better on 18 of 24 targets) and the per-pitch gates
+another +0.086 ± 0.032 (better on 16); together the gain is well outside the
+run-to-run noise, the split between the two less certain.
 Predicted notes went 557 → 404 → 291, against 279 real ones. F1 per target
 now ranges from 0.32 to 1.0 (median 0.81); the seed-1 demo that used to be
 quoted (F1 0.89 then) is one of the better targets, not a typical one. The
 Quick preset (150 + 100 steps) does about as well: P 0.70, R 0.83, F1 0.750.
 
 With per-pitch gates, stage 2 no longer improves the note list on average:
-the notes decoded from the roll already score F1 0.774 (P 0.74, R 0.85) and
-the final ones 0.757 (−0.018 ± 0.021 paired; recall drops to 0.77), whereas
-with Quick's shorter stage 1 it still adds +0.09. Pruning at `prune_tol` =
+over the three runs the notes decoded from the roll score F1 0.759–0.774
+(recall ~0.85) and the final ones 0.715–0.764, on average 0.02 lower
+(recall drops to 0.73–0.78), whereas with Quick's shorter stage 1 it still adds
++0.09. Pruning at `prune_tol` =
 0.005 instead of 0.01 makes no difference (−0.004 ± 0.025), so the lost notes
 come from the refinement itself (onsets drifting > 50 ms, or velocities
 pushed down by λ₂). Stage 2 still lowers the loss and fits continuous

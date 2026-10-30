@@ -244,11 +244,14 @@ def fit(
     return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes)
 
 
-def note_metrics(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict:
-    """Greedy one-to-one matching on rounded pitch and onset within onset_tol seconds."""
+def match_notes(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict[int, int]:
+    """Greedy one-to-one matching on rounded pitch and onset within onset_tol seconds.
+
+    Returns {reference index: predicted index} for the matched pairs.
+    """
+    matches: dict[int, int] = {}
     used = set()
-    tp = 0
-    for r in ref:
+    for j, r in enumerate(ref):
         best, best_dt = None, onset_tol
         for i, p in enumerate(pred):
             if i in used or round(p.pitch) != round(r.pitch):
@@ -258,7 +261,13 @@ def note_metrics(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> 
                 best, best_dt = i, dt
         if best is not None:
             used.add(best)
-            tp += 1
+            matches[j] = best
+    return matches
+
+
+def note_metrics(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict:
+    """Precision/recall/F1 of predicted notes under :func:`match_notes`."""
+    tp = len(match_notes(pred, ref, onset_tol))
     precision = tp / len(pred) if pred else 0.0
     recall = tp / len(ref) if ref else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0

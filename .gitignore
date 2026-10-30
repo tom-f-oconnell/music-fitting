@@ -6,3 +6,4 @@ fits/
 .pytest_cache/
 *.egg-info/
 web_jobs/
+eval_out/

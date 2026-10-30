@@ -42,12 +42,17 @@ a CPU. There is no login, so only run the app on your own machine.
 ```
 python scripts/fit_audio.py clip.opus --offset 10 --duration 4 --voices 2 --out fits/clip
 python scripts/demo_fit_synthetic.py --out demo_out      # synthetic target, prints note P/R and patch
+python scripts/eval_synthetic.py --seeds 1-24 --out eval_out/base.json                # 24 targets, mean P/R/F1
+python scripts/eval_synthetic.py --set prune_tol=0.005 --compare eval_out/base.json   # paired comparison
 ```
 
 `fit_audio.py` writes `target.wav`, `fit.wav`, `notes.mid`, `notes.json` and
 `params.json`. Options: `--sr`, `--pitch-min/--pitch-max` (MIDI), `--roll-steps`,
 `--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer spurious notes,
 lower if notes go missing), `--seed`, `--device` (`auto`, `cpu`, `cuda`, ...).
+`eval_synthetic.py` fits many synthetic targets (in parallel on a GPU, ~5 min
+for 24) with any `FitConfig` overrides (`--set field=value`); use it rather
+than single fits to judge a change (see [design.md](design.md#evaluation-on-synthetic-targets)).
 From Python, `musicfit.fit.fit(audio_tensor, FitConfig(...))`; `FitConfig`
 documents every knob.
 
@@ -90,7 +95,7 @@ musicfit/
   synthetic.py    random melody + random patch targets (ground truth known)
   web/            FastAPI app (app.py), background jobs (jobs.py), fast re-render (render.py), static/ UI
   dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py)
-scripts/          fit_audio.py, demo_fit_synthetic.py, build_aphex_twin_dataset.py
+scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, build_aphex_twin_dataset.py
 tests/
 ```
 
