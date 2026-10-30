@@ -15,7 +15,7 @@ import soundfile as sf
 import torch
 
 from ..audio_io import load_audio, save_audio
-from ..fit import FitConfig, fit, note_metrics
+from ..fit import FitConfig, fit, note_metrics, stage2_steps
 from ..synthetic import synthetic_target
 
 
@@ -139,7 +139,8 @@ class JobManager:
         job.status = "running"
         self._save(job)
         t0 = time.time()
-        total_steps = cfg.roll_steps + cfg.note_steps + 2
+        total_steps = cfg.roll_steps + stage2_steps(cfg) + 2
+        c["total_steps"] = total_steps  # for the loss chart's x axis
         last_save = [0.0]
 
         def progress(info: dict) -> None:

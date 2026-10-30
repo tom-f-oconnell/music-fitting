@@ -90,6 +90,19 @@ def test_note_metrics():
     assert m["tp"] == 1 and m["precision"] == 0.5 and m["recall"] == 0.5
 
 
+def test_prune_redundant_keeps_only_needed_notes():
+    from musicfit.fit import _prune_redundant
+
+    synth = Synth(SR, n_harmonics=16, params=SynthParams({"reverb_mix": 0.0, "delay_mix": 0.0}))
+    real = [Note(60.0, 0.1, 0.3, 0.8), Note(67.0, 0.5, 0.3, 0.7)]
+    with torch.no_grad():
+        target = synth.render_notes(*(torch.tensor([getattr(n, a) for n in real])
+                                      for a in ("pitch", "onset", "duration", "velocity")), SR)
+    notes = real + [Note(72.0, 0.8, 0.1, 0.1), Note(60.0, 0.1, 0.3, 0.1)]  # spurious, and a duplicate onset
+    kept = _prune_redundant(notes, [synth], target, MultiResolutionSTFTLoss((512, 128)), 0.01)
+    assert kept == real
+
+
 def test_fit_smoke_recovers_single_note():
     """Tiny end-to-end fit: one note, few steps; loss must drop and the note must be found."""
     torch.manual_seed(0)

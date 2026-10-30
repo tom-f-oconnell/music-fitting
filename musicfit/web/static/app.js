@@ -4,7 +4,6 @@
 const QUALITY = {
   quick: { roll_steps: 150, note_steps: 100 },
   standard: { roll_steps: 400, note_steps: 300 },
-  thorough: { roll_steps: 1000, note_steps: 600 },
 };
 const VOICE_COLORS = ["#ffb547", "#c792ea", "#67d391", "#ff7a90"];
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -163,7 +162,7 @@ function drawLossChart(curve, cfg) {
   const g = c.getContext("2d");
   g.clearRect(0, 0, w, h);
   const ys = curve.map((p) => Math.log(Math.max(p[1], 1e-6)));
-  const total = (cfg.roll_steps || 400) + (cfg.note_steps || 300) + 2;
+  const total = cfg.total_steps || (cfg.roll_steps || 400) + (cfg.note_steps || 300) + 2;
   const ymin = Math.min(...ys), ymax = Math.max(...ys);
   const pad = 6 * dpr;
   const X = (s) => pad + (w - 2 * pad) * s / total;

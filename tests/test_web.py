@@ -39,6 +39,8 @@ def test_demo_job_render_and_exports(client):
     r = job["result"]
     assert r["reference"]["metrics_final"]["n_ref"] == 3
     assert job["loss_curve"] and job["progress"] == 1.0
+    # the curve covers both stages incl. the post-pruning refinement, within the chart's x range
+    assert max(p[0] for p in job["loss_curve"]) < job["config"]["total_steps"]
     for which in ("target", "fit"):
         wav = client.get(f"/api/jobs/{job['id']}/audio/{which}.wav")
         assert wav.status_code == 200 and wav.content[:4] == b"RIFF"

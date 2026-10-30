@@ -364,9 +364,10 @@ class Synth(nn.Module):
         """Render a soft onset piano roll.
 
         onset_roll: [P, M] non-negative note-on strengths (velocity) per pitch and frame.
-        Every cell triggers a note of the given (global) duration; the envelopes are a
-        linear function of the roll, so they are computed as one FFT convolution of
-        the roll (as an impulse train) with the ADSR kernel.
+        duration: gate length, scalar or [P] (one per pitch row).
+        Every cell triggers a note of its row's duration; the envelopes are a linear
+        function of the roll, so they are computed as one FFT convolution per row of
+        the roll (as an impulse train) with that row's ADSR kernel.
         """
         p = self.params.values()
         sr = self.sr
@@ -378,8 +379,9 @@ class Synth(nn.Module):
         impulses[:, idx[keep]] = onset_roll[:, keep]
 
         t = torch.arange(n_samples, device=onset_roll.device, dtype=torch.float32) / sr
-        k_amp = adsr(t, duration, p["amp_attack"], p["amp_decay"], p["amp_sustain"], p["amp_release"])
-        k_filt = adsr(t, duration, p["filt_attack"], p["filt_decay"], p["filt_sustain"], p["filt_release"])
+        dur = duration.reshape(-1, 1)  # [1 or P, 1]
+        k_amp = adsr(t, dur, p["amp_attack"], p["amp_decay"], p["amp_sustain"], p["amp_release"])
+        k_filt = adsr(t, dur, p["filt_attack"], p["filt_decay"], p["filt_sustain"], p["filt_release"])
         n_fft = _next_pow2(2 * n_samples)
         I = torch.fft.rfft(impulses, n_fft)
         amp = torch.fft.irfft(I * torch.fft.rfft(k_amp, n_fft), n_fft)[:, :n_samples]

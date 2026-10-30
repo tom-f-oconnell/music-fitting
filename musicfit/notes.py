@@ -30,6 +30,7 @@ class PianoRoll(nn.Module):
     This is the relaxation used to discover *which* notes are played: the
     discrete note sequence becomes a continuous [P, M] array that gradient
     descent can move freely, with an L1 penalty pushing it to be sparse.
+    Each pitch row has its own (trainable) gate length.
     """
 
     def __init__(
@@ -49,8 +50,9 @@ class PianoRoll(nn.Module):
         P = pitch_max - pitch_min + 1
         noise = torch.randn(P, n_frames, generator=generator) * init_noise
         self.logits = nn.Parameter(torch.full((P, n_frames), init_logit) + noise)
-        # global gate length for every note in the roll (log-parameterised)
-        self.log_duration = nn.Parameter(torch.tensor(math.log(note_duration)))
+        # gate length per pitch (log-parameterised); one shared length made sustained
+        # sounds come out as rapid re-triggers
+        self.log_duration = nn.Parameter(torch.full((P,), math.log(note_duration)))
 
     def strengths(self) -> torch.Tensor:
         return torch.sigmoid(self.logits)
@@ -76,7 +78,7 @@ class PianoRoll(nn.Module):
         """
         v = self.strengths()
         P, M = v.shape
-        dur = float(self.duration())
+        durs = self.duration().tolist()
         notes: list[Note] = []
         pad = torch.nn.functional.pad(v[None], (merge_frames, merge_frames), value=0.0)[0]
         local_max = torch.nn.functional.max_pool1d(pad[None], 2 * merge_frames + 1, stride=1)[0]
@@ -89,7 +91,7 @@ class PianoRoll(nn.Module):
                     continue
                 frames = torch.arange(lo, hi, dtype=torch.float32, device=v.device)
                 onset = float((w * frames).sum() / w.sum()) * self.frame_hop_s
-                notes.append(Note(float(self.pitches[pi]), onset, dur, min(mass, 1.0), voice))
+                notes.append(Note(float(self.pitches[pi]), onset, durs[pi], min(mass, 1.0), voice))
         notes.sort(key=lambda n: (n.onset, n.pitch))
         return notes
 

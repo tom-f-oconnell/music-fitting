@@ -28,9 +28,8 @@
           <label>Voices<input type="number" name="voices" value="1" min="1" max="4"></label>
           <label>Quality
             <select name="quality">
-              <option value="quick">Quick (~3 min)</option>
-              <option value="standard" selected>Standard (~7 min)</option>
-              <option value="thorough">Thorough (~20 min)</option>
+              <option value="quick">Quick (slightly more spurious notes)</option>
+              <option value="standard" selected>Standard</option>
             </select>
           </label>
         </div>
@@ -44,7 +43,7 @@
             <label>Sparsity<input type="number" name="sparsity" value="0.5" min="0" step="0.1"></label>
             <label>Seed<input type="number" name="seed" value="0"></label>
           </div>
-          <p class="hint">Times are for a 3-4 s clip and one voice on a 4-core CPU; they scale with clip length and voices.</p>
+          <p class="hint">A Standard fit of a 3-4 s clip with one voice takes about 20 s on an NVIDIA GPU and several minutes on a CPU; time grows with clip length and voices. Longer runs than Standard fit worse, not better.</p>
           <p class="hint">Sparsity is the penalty that keeps the piano roll from explaining everything with many quiet notes. Raise it if you get spurious notes, lower it if notes go missing.</p>
         </details>
         <button type="submit" class="primary" id="upload-btn">Upload and fit</button>
@@ -58,8 +57,8 @@
         <label>Seed<input type="number" id="demo-seed" value="1"></label>
         <label>Quality
           <select id="demo-quality">
-            <option value="quick">Quick (~3 min, more spurious notes)</option>
-            <option value="standard" selected>Standard (~7 min)</option>
+            <option value="quick">Quick (slightly more spurious notes)</option>
+            <option value="standard" selected>Standard</option>
           </select>
         </label>
       </div>

@@ -6,8 +6,9 @@ an L1 sparsity penalty on the roll.
 
 Stage 2 (refine notes): each roll is peak-picked into a discrete note list
 whose onsets, durations, velocities and fine pitch are continuous parameters.
-Notes and patch are optimised together again; notes whose velocity collapses
-are pruned at the end.
+Notes and patch are optimised together again, with an L1 penalty on note
+velocities.  Then notes are pruned leave-one-out (each note has to lower the
+loss by at least ``prune_tol`` to stay) and the survivors are refined briefly.
 """
 
 from __future__ import annotations
@@ -43,7 +44,10 @@ class FitConfig:
     note_steps: int = 300
     note_lrs: dict = field(default_factory=lambda: {"onset": 0.003, "duration": 0.03, "velocity": 0.05, "detune": 0.02})
     synth_lr_stage2: float = 0.01
+    note_sparsity: float = 3.0  # L1 weight on note velocities (sum / n_frames, like the stage-1 penalty)
     prune_velocity: float = 0.05
+    prune_tol: float = 0.01  # leave-one-out pruning: drop notes whose removal raises the loss by < this (0: off)
+    polish_steps: int = 100  # refinement steps after leave-one-out pruning
     fft_sizes: tuple = (2048, 1024, 512, 256, 128)
     lr_decay: float = 0.1  # final/initial learning-rate ratio (linear decay within each stage)
     log_every: int = 50
@@ -71,6 +75,11 @@ def _initial_patch(voice: int) -> SynthParams:
     return SynthParams(values, wave)
 
 
+def stage2_steps(cfg: FitConfig) -> int:
+    """Optimiser steps in stage 2, including the refinement after pruning."""
+    return cfg.note_steps + (cfg.polish_steps + 1 if cfg.prune_tol > 0 else 0)
+
+
 def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,6 +95,46 @@ def _log(history, stage, step, loss, extra, t0, verbose):
     history.append(rec)
     if verbose:
         print(" ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}" for k, v in rec.items()), flush=True)
+
+
+@torch.no_grad()
+def _render_subset(notes: list[Note], synths: list[Synth], keep: list[bool], T: int, device) -> torch.Tensor:
+    out = torch.zeros(T, device=device)
+    for v, synth in enumerate(synths):
+        vn = [n for n, k in zip(notes, keep) if k and n.voice == v]
+        out = out + synth.render_notes(*(torch.tensor([getattr(n, a) for n in vn], device=device)
+                                         for a in ("pitch", "onset", "duration", "velocity")), T)
+    return out
+
+
+@torch.no_grad()
+def removal_deltas(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn) -> tuple[float, list[float]]:
+    """Loss of all notes, and how much it rises when each note alone is removed."""
+    T, dev = target.shape[-1], target.device
+    keep = [True] * len(notes)
+    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+    deltas = []
+    for i in range(len(notes)):
+        keep[i] = False
+        deltas.append(float(loss_fn(_render_subset(notes, synths, keep, T, dev), target)) - base)
+        keep[i] = True
+    return base, deltas
+
+
+@torch.no_grad()
+def _prune_redundant(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn, tol: float) -> list[Note]:
+    """Greedily drop notes, quietest first, whose removal raises the loss by less than tol."""
+    T, dev = target.shape[-1], target.device
+    keep = [True] * len(notes)
+    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+    for i in sorted(range(len(notes)), key=lambda i: notes[i].velocity):
+        keep[i] = False
+        loss = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+        if loss - base < tol:
+            base = loss
+        else:
+            keep[i] = True
+    return [n for n, k in zip(notes, keep) if k]
 
 
 def fit(
@@ -148,30 +197,44 @@ def fit(
     # ---- stage 2: explicit notes ---------------------------------------------
     seqs = [NoteSequence([n for n in roll_notes if n.voice == v] or [Note(60.0, 0.0, 0.1, 0.02, v)]).to(device)
             for v in range(cfg.n_voices)]
-    groups = [{"params": list(s.params.parameters()), "lr": cfg.synth_lr_stage2} for s in synths]
-    for q in seqs:
-        groups += [
-            {"params": [q.onset], "lr": cfg.note_lrs["onset"]},
-            {"params": [q.log_duration], "lr": cfg.note_lrs["duration"]},
-            {"params": [q.vel_logit], "lr": cfg.note_lrs["velocity"]},
-            {"params": [q.detune_raw], "lr": cfg.note_lrs["detune"]},
-        ]
-    opt = torch.optim.Adam(groups)
-    sched = _linear_decay(opt, cfg.note_steps, cfg.lr_decay)
-    for step in range(cfg.note_steps + 1):
-        pred = sum(q.render(s, T) for q, s in zip(seqs, synths))
-        loss = loss_fn(pred, target)
-        report({"stage": "notes", "step": step, "total": cfg.note_steps, "loss": loss.item()})
-        if step % cfg.log_every == 0 or step == cfg.note_steps:
-            _log(history, "notes", step, loss.item(), {"n_notes": sum(len(q) for q in seqs)}, t0, verbose)
-        if step == cfg.note_steps:
-            break
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        sched.step()
+    total = stage2_steps(cfg)
 
+    def refine(seqs, n_steps, first_step, lr_scale=1.0):
+        groups = [{"params": list(s.params.parameters()), "lr": cfg.synth_lr_stage2 * lr_scale} for s in synths]
+        for q in seqs:
+            groups += [
+                {"params": [q.onset], "lr": cfg.note_lrs["onset"] * lr_scale},
+                {"params": [q.log_duration], "lr": cfg.note_lrs["duration"] * lr_scale},
+                {"params": [q.vel_logit], "lr": cfg.note_lrs["velocity"] * lr_scale},
+                {"params": [q.detune_raw], "lr": cfg.note_lrs["detune"] * lr_scale},
+            ]
+        opt = torch.optim.Adam(groups)
+        sched = _linear_decay(opt, n_steps, cfg.lr_decay)
+        for i in range(n_steps + 1):
+            step = first_step + i
+            pred = sum(q.render(s, T) for q, s in zip(seqs, synths))
+            loss = loss_fn(pred, target)
+            report({"stage": "notes", "step": step, "total": total, "loss": loss.item()})
+            if step % cfg.log_every == 0 or i == n_steps:
+                _log(history, "notes", step, loss.item(), {"n_notes": sum(len(q) for q in seqs)}, t0, verbose)
+            if i == n_steps:
+                break
+            if cfg.note_sparsity:
+                loss = loss + cfg.note_sparsity * sum(q.velocity().sum() for q in seqs) / n_frames
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+
+    refine(seqs, cfg.note_steps, 0)
     notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
+    if cfg.prune_tol > 0:
+        notes = _prune_redundant(notes, synths, target, loss_fn, cfg.prune_tol)
+        if verbose:
+            print(f"{len(notes)} notes left after leave-one-out pruning", flush=True)
+        seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
+        refine(seqs, cfg.polish_steps, cfg.note_steps + 1, lr_scale=0.3)
+        notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     notes.sort(key=lambda n: (n.onset, n.pitch))
     with torch.no_grad():
         final_seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
