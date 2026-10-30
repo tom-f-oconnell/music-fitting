@@ -49,7 +49,8 @@ def main():
     with open(os.path.join(args.out, "notes.json"), "w") as f:
         json.dump([n.as_dict() for n in res.notes], f, indent=2)
     with open(os.path.join(args.out, "params.json"), "w") as f:
-        json.dump({"voices": [s.params.describe() for s in res.synths], "history": res.history}, f, indent=2)
+        json.dump({"voices": [s.params.describe() for s in res.synths], "tuning_cents": res.tuning_cents,
+                   "history": res.history}, f, indent=2)
     print(f"wrote {len(res.notes)} notes and {len(res.synths)} patches to {args.out}")
 
 

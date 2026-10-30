@@ -188,6 +188,7 @@ class JobManager:
                 "notes": [n.as_dict() for n in res.notes],
                 "roll_notes": [n.as_dict() for n in res.roll_notes],
                 "final_loss": res.history[-1]["loss"],
+                "tuning_cents": res.tuning_cents,
                 "history": res.history,
                 "reference": reference,
             }

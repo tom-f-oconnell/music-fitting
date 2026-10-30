@@ -43,10 +43,13 @@ class PianoRoll(nn.Module):
         init_noise: float = 0.5,
         note_duration: float = 0.25,
         generator: torch.Generator | None = None,
+        tuning_cents: float = 0.0,
     ):
         super().__init__()
         self.frame_hop_s = frame_hop_s
-        self.register_buffer("pitches", torch.arange(pitch_min, pitch_max + 1, dtype=torch.float32))
+        # one row per semitone, shifted with the recording's tuning offset
+        pitches = torch.arange(pitch_min, pitch_max + 1, dtype=torch.float32) + tuning_cents / 100
+        self.register_buffer("pitches", pitches)
         P = pitch_max - pitch_min + 1
         noise = torch.randn(P, n_frames, generator=generator) * init_noise
         self.logits = nn.Parameter(torch.full((P, n_frames), init_logit) + noise)

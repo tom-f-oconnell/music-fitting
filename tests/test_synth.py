@@ -135,3 +135,34 @@ def test_synthetic_mismatch_keeps_melody_and_sets_levels():
     assert float((coded - clean).pow(2).sum() / clean.pow(2).sum()) < 0.05  # aligned, small coding error
     tuned, _, _ = synthetic_target(9, length_s=2.0, mismatch={"tuning": 30})
     assert not torch.allclose(tuned, clean)
+
+
+def test_estimate_tuning():
+    from musicfit.tuning import estimate_tuning
+
+    t = torch.arange(2 * SR) / SR
+    tones = sum(torch.sin(2 * torch.pi * 440 * 2 ** ((p + 0.3) / 12) * k * t) / k for p in (-9, -5, 0) for k in (1, 2, 3))
+    cents, confidence = estimate_tuning(tones, SR)
+    assert abs(cents - 30) < 3 and confidence > 0.8
+    _, noise_confidence = estimate_tuning(torch.randn(2 * SR, generator=torch.Generator().manual_seed(0)), SR)
+    assert noise_confidence < 0.3
+
+
+def test_noise_voice_render_is_linear_in_hits_and_differentiable():
+    from musicfit.drums import NoiseVoice
+
+    voice = NoiseVoice(100, 0.01, SR, n_kinds=2, noise_floor=True, init_logit=-30.0, init_noise=0.0)
+    with torch.no_grad():
+        floor = voice.render(SR)
+        voice.logits[0, 20] = 30.0  # one kind-0 hit at 0.2 s
+        one = voice.render(SR) - floor
+        voice.logits[0, 50] = 30.0
+        two = voice.render(SR) - floor
+    hop = SR // 100
+    assert one[: 20 * hop].abs().max() < 1e-6 and one.abs().max() > 0  # nothing before the hit
+    assert torch.allclose(two[50 * hop:] - one[50 * hop:], one[20 * hop: 20 * hop + len(two) - 50 * hop], atol=1e-5)
+    assert [k for k, _, _ in voice.hits()] == [0, 0]
+    loss = MultiResolutionSTFTLoss((512, 128))(voice.render(SR), torch.randn(SR) * 0.1)
+    loss.backward()
+    for name, p in voice.named_parameters():
+        assert p.grad is not None and torch.isfinite(p.grad).all(), name

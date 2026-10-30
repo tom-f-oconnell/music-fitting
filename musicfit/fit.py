@@ -20,9 +20,11 @@ from typing import Callable
 
 import torch
 
+from .drums import NoiseVoice
 from .loss import MultiResolutionSTFTLoss
 from .notes import Note, NoteSequence, PianoRoll
 from .synth import Synth, SynthParams
+from .tuning import estimate_tuning
 
 
 @dataclass
@@ -33,6 +35,10 @@ class FitConfig:
     pitch_max: int = 84  # C6
     frame_hop_s: float = 0.01
     n_harmonics: int = 32
+    # offset of the piano-roll pitch grid from A440 in cents, or "auto" to estimate it from
+    # the target (used if the estimate's consistency is at least tuning_min_confidence, else 0)
+    tuning_cents: float | str = "auto"
+    tuning_min_confidence: float = 0.2
     # stage 1
     roll_steps: int = 400
     roll_lr: float = 0.1
@@ -40,6 +46,9 @@ class FitConfig:
     sparsity: float = 1.0  # L1 weight on roll mass per frame, reached after sparsity_warmup
     sparsity_warmup: float = 0.5  # fraction of roll_steps over which the L1 weight ramps up from 0
     decode_threshold: float = 0.3
+    # unpitched sounds (drums.NoiseVoice): drum kinds triggered by an onset roll, and a noise floor
+    drum_kinds: int = 0
+    noise_floor: bool = False
     # stage 2
     note_steps: int = 300
     note_lrs: dict = field(default_factory=lambda: {"onset": 0.003, "duration": 0.03, "velocity": 0.05, "detune": 0.02})
@@ -62,6 +71,8 @@ class FitResult:
     audio: torch.Tensor
     history: list[dict]
     roll_notes: list[Note]
+    tuning_cents: float = 0.0  # pitch-grid offset used in stage 1
+    noise: NoiseVoice | None = None  # drums / noise floor, if fitted (its render is part of audio)
 
 
 def _initial_patch(voice: int) -> SynthParams:
@@ -78,6 +89,13 @@ def _initial_patch(voice: int) -> SynthParams:
 def stage2_steps(cfg: FitConfig) -> int:
     """Optimiser steps in stage 2, including the refinement after pruning."""
     return cfg.note_steps + (cfg.polish_steps + 1 if cfg.prune_tol > 0 else 0)
+
+
+def _noise_groups(noise: NoiseVoice | None, roll_lr: float, param_lr: float) -> list[dict]:
+    if noise is None:
+        return []
+    other = [p for name, p in noise.named_parameters() if name != "logits"]
+    return [{"params": [noise.logits], "lr": roll_lr}, {"params": other, "lr": param_lr}]
 
 
 def resolve_device(device: str) -> torch.device:
@@ -98,8 +116,9 @@ def _log(history, stage, step, loss, extra, t0, verbose):
 
 
 @torch.no_grad()
-def _render_subset(notes: list[Note], synths: list[Synth], keep: list[bool], T: int, device) -> torch.Tensor:
-    out = torch.zeros(T, device=device)
+def _render_subset(notes: list[Note], synths: list[Synth], keep: list[bool], T: int, device,
+                   background: torch.Tensor | None = None) -> torch.Tensor:
+    out = torch.zeros(T, device=device) if background is None else background.clone()
     for v, synth in enumerate(synths):
         vn = [n for n, k in zip(notes, keep) if k and n.voice == v]
         out = out + synth.render_notes(*(torch.tensor([getattr(n, a) for n in vn], device=device)
@@ -108,28 +127,30 @@ def _render_subset(notes: list[Note], synths: list[Synth], keep: list[bool], T: 
 
 
 @torch.no_grad()
-def removal_deltas(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn) -> tuple[float, list[float]]:
-    """Loss of all notes, and how much it rises when each note alone is removed."""
+def removal_deltas(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn,
+                   background: torch.Tensor | None = None) -> tuple[float, list[float]]:
+    """Loss of all notes (on top of background), and how much it rises when each note alone is removed."""
     T, dev = target.shape[-1], target.device
     keep = [True] * len(notes)
-    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev, background), target))
     deltas = []
     for i in range(len(notes)):
         keep[i] = False
-        deltas.append(float(loss_fn(_render_subset(notes, synths, keep, T, dev), target)) - base)
+        deltas.append(float(loss_fn(_render_subset(notes, synths, keep, T, dev, background), target)) - base)
         keep[i] = True
     return base, deltas
 
 
 @torch.no_grad()
-def _prune_redundant(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn, tol: float) -> list[Note]:
+def _prune_redundant(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn, tol: float,
+                     background: torch.Tensor | None = None) -> list[Note]:
     """Greedily drop notes, quietest first, whose removal raises the loss by less than tol."""
     T, dev = target.shape[-1], target.device
     keep = [True] * len(notes)
-    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+    base = float(loss_fn(_render_subset(notes, synths, keep, T, dev, background), target))
     for i in sorted(range(len(notes)), key=lambda i: notes[i].velocity):
         keep[i] = False
-        loss = float(loss_fn(_render_subset(notes, synths, keep, T, dev), target))
+        loss = float(loss_fn(_render_subset(notes, synths, keep, T, dev, background), target))
         if loss - base < tol:
             base = loss
         else:
@@ -163,21 +184,36 @@ def fit(
 
     synths = [Synth(cfg.sr, cfg.n_harmonics, params=_initial_patch(v), noise_seed=v).to(device)
               for v in range(cfg.n_voices)]
+    if cfg.tuning_cents == "auto":
+        cents, confidence = estimate_tuning(target, cfg.sr)
+        tuning = cents if confidence >= cfg.tuning_min_confidence else 0.0
+        if verbose:
+            print(f"tuning: {cents:+.1f} cents (consistency {confidence:.2f}), using {tuning:+.1f}", flush=True)
+    else:
+        tuning = float(cfg.tuning_cents)
     rolls = [
-        PianoRoll(n_frames, cfg.pitch_min, cfg.pitch_max, cfg.frame_hop_s, generator=gen).to(device)
+        PianoRoll(n_frames, cfg.pitch_min, cfg.pitch_max, cfg.frame_hop_s, generator=gen,
+                  tuning_cents=tuning).to(device)
         for _ in range(cfg.n_voices)
     ]
+    noise = None
+    if cfg.drum_kinds or cfg.noise_floor:
+        noise = NoiseVoice(n_frames, cfg.frame_hop_s, cfg.sr, cfg.drum_kinds, noise_floor=cfg.noise_floor,
+                           generator=gen, seed=cfg.seed).to(device)
+    render_noise = (lambda: noise.render(T)) if noise is not None else (lambda: 0.0)
+    noise_mass = (lambda: noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
 
     # ---- stage 1: soft piano roll -------------------------------------------
     opt = torch.optim.Adam(
         [{"params": list(r.parameters()), "lr": cfg.roll_lr} for r in rolls]
         + [{"params": list(s.params.parameters()), "lr": cfg.synth_lr} for s in synths]
+        + _noise_groups(noise, cfg.roll_lr, cfg.synth_lr)
     )
     sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
     for step in range(cfg.roll_steps + 1):
-        pred = sum(r.render(s, T) for r, s in zip(rolls, synths))
+        pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + render_noise()
         spec = loss_fn(pred, target)
-        sparse = sum(r.strengths().sum(0).mean() for r in rolls)  # mean active mass per frame
+        sparse = sum(r.strengths().sum(0).mean() for r in rolls) + noise_mass()  # mean active mass per frame
         ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
         loss = spec + ramp * cfg.sparsity * sparse
         report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec.item()})
@@ -201,6 +237,7 @@ def fit(
 
     def refine(seqs, n_steps, first_step, lr_scale=1.0):
         groups = [{"params": list(s.params.parameters()), "lr": cfg.synth_lr_stage2 * lr_scale} for s in synths]
+        groups += _noise_groups(noise, 0.1 * cfg.roll_lr * lr_scale, cfg.synth_lr_stage2 * lr_scale)
         for q in seqs:
             groups += [
                 {"params": [q.onset], "lr": cfg.note_lrs["onset"] * lr_scale},
@@ -212,7 +249,7 @@ def fit(
         sched = _linear_decay(opt, n_steps, cfg.lr_decay)
         for i in range(n_steps + 1):
             step = first_step + i
-            pred = sum(q.render(s, T) for q, s in zip(seqs, synths))
+            pred = sum(q.render(s, T) for q, s in zip(seqs, synths)) + render_noise()
             loss = loss_fn(pred, target)
             report({"stage": "notes", "step": step, "total": total, "loss": loss.item()})
             if step % cfg.log_every == 0 or i == n_steps:
@@ -221,6 +258,7 @@ def fit(
                 break
             if cfg.note_sparsity:
                 loss = loss + cfg.note_sparsity * sum(q.velocity().sum() for q in seqs) / n_frames
+            loss = loss + cfg.sparsity * noise_mass()
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -229,7 +267,9 @@ def fit(
     refine(seqs, cfg.note_steps, 0)
     notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     if cfg.prune_tol > 0:
-        notes = _prune_redundant(notes, synths, target, loss_fn, cfg.prune_tol)
+        with torch.no_grad():
+            background = render_noise() if noise is not None else None
+        notes = _prune_redundant(notes, synths, target, loss_fn, cfg.prune_tol, background)
         if verbose:
             print(f"{len(notes)} notes left after leave-one-out pruning", flush=True)
         seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
@@ -238,10 +278,10 @@ def fit(
     notes.sort(key=lambda n: (n.onset, n.pitch))
     with torch.no_grad():
         final_seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
-        audio = sum(q.render(s, T) for q, s in zip(final_seqs, synths))
+        audio = sum(q.render(s, T) for q, s in zip(final_seqs, synths)) + render_noise()
         final_loss = float(loss_fn(audio, target))
     _log(history, "final", 0, final_loss, {"n_notes": len(notes)}, t0, verbose)
-    return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes)
+    return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes, tuning, noise)
 
 
 def match_notes(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict[int, int]:
