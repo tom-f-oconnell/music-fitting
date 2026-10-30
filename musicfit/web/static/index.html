@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>musicfit</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">musicfit <span>fit a synth + notes to audio, then play with the patch</span></div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <section class="card">
+      <h2>Fit a clip</h2>
+      <form id="upload-form">
+        <label class="drop" id="drop">
+          <input type="file" id="file" name="file" accept="audio/*,video/*,.opus,.flac,.m4a,.ogg,.wav,.mp3">
+          <span id="drop-text">Drop an audio file here or click to choose</span>
+        </label>
+        <div class="row">
+          <label>Start (s)<input type="number" name="offset" value="0" min="0" step="0.1"></label>
+          <label>Length (s)<input type="number" name="duration" value="4" min="0.25" max="15" step="0.25"></label>
+        </div>
+        <div class="row">
+          <label>Voices<input type="number" name="voices" value="1" min="1" max="4"></label>
+          <label>Quality
+            <select name="quality">
+              <option value="quick">Quick (~3 min)</option>
+              <option value="standard" selected>Standard (~7 min)</option>
+              <option value="thorough">Thorough (~20 min)</option>
+            </select>
+          </label>
+        </div>
+        <details>
+          <summary>Advanced</summary>
+          <div class="row">
+            <label>Lowest note<input type="number" name="pitch_min" value="36" min="0" max="126"></label>
+            <label>Highest note<input type="number" name="pitch_max" value="84" min="1" max="127"></label>
+          </div>
+          <div class="row">
+            <label>Sparsity<input type="number" name="sparsity" value="0.5" min="0" step="0.1"></label>
+            <label>Seed<input type="number" name="seed" value="0"></label>
+          </div>
+          <p class="hint">Times are for a 3-4 s clip and one voice on a 4-core CPU; they scale with clip length and voices.</p>
+          <p class="hint">Sparsity is the penalty that keeps the piano roll from explaining everything with many quiet notes. Raise it if you get spurious notes, lower it if notes go missing.</p>
+        </details>
+        <button type="submit" class="primary" id="upload-btn">Upload and fit</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Synthetic demo</h2>
+      <p class="hint">Renders a random melody with a random patch, then fits it from scratch, so you can compare against the ground truth.</p>
+      <div class="row">
+        <label>Seed<input type="number" id="demo-seed" value="1"></label>
+        <label>Quality
+          <select id="demo-quality">
+            <option value="quick">Quick (~3 min, more spurious notes)</option>
+            <option value="standard" selected>Standard (~7 min)</option>
+          </select>
+        </label>
+      </div>
+      <button id="demo-btn">Run demo fit</button>
+    </section>
+
+    <section class="card">
+      <h2>Jobs</h2>
+      <ul id="jobs" class="jobs"><li class="hint">No jobs yet.</li></ul>
+    </section>
+  </aside>
+
+  <main class="main" id="main">
+    <div id="empty" class="empty">
+      <p>Upload a clip (a few seconds of a monophonic or simple synth line works best) or run the synthetic demo.</p>
+    </div>
+
+    <div id="job-view" hidden>
+      <section class="card job-head">
+        <div class="job-title">
+          <h1 id="job-name"></h1>
+          <span id="job-status" class="badge"></span>
+          <button id="cancel-btn" class="small" hidden>Cancel</button>
+          <button id="delete-btn" class="small ghost" hidden>Delete</button>
+        </div>
+        <div id="progress-wrap">
+          <div class="progress"><div id="progress-bar"></div></div>
+          <div id="progress-text" class="hint"></div>
+        </div>
+        <canvas id="loss-chart" class="loss-chart"></canvas>
+        <div id="job-error" class="error" hidden></div>
+      </section>
+
+      <div id="result-view" hidden>
+        <section class="card transport">
+          <div class="buttons">
+            <button data-play="target">▶ Target</button>
+            <button data-play="fit">▶ Fitted</button>
+            <button data-play="tweaked" class="primary">▶ Tweaked</button>
+            <button id="stop-btn">■ Stop</button>
+            <label class="check"><input type="checkbox" id="loop"> Loop</label>
+          </div>
+          <div class="readout">
+            <span>Spectral loss vs target: fitted <b id="loss-fit">–</b> · tweaked <b id="loss-tweak">–</b></span>
+            <span id="render-state" class="hint"></span>
+          </div>
+        </section>
+
+        <section class="card viz">
+          <div class="viz-label">Target spectrogram</div>
+          <div class="canvas-wrap"><canvas id="spec-target"></canvas><div class="playhead"></div></div>
+          <div class="viz-label">Tweaked render spectrogram</div>
+          <div class="canvas-wrap"><canvas id="spec-tweak"></canvas><div class="playhead"></div></div>
+          <div class="viz-label">Notes <span class="hint">click a note to mute or unmute it<span id="ref-legend" hidden>; outlined grey boxes are the ground-truth notes</span></span></div>
+          <div class="canvas-wrap"><canvas id="roll"></canvas><div class="playhead"></div><div id="tooltip" class="tooltip" hidden></div></div>
+          <div id="metrics" class="hint"></div>
+        </section>
+
+        <section class="card synth">
+          <div class="synth-head">
+            <h2>Synth patch</h2>
+            <div id="voice-tabs" class="tabs"></div>
+            <div class="spacer"></div>
+            <label class="check"><input type="checkbox" id="voice-mute"> Mute voice</label>
+            <button id="reset-btn" class="small">Reset to fitted</button>
+          </div>
+          <p class="hint legend"><i class="tick fit"></i> fitted value <span id="true-legend" hidden><i class="tick true"></i> ground truth</span></p>
+          <div id="sliders" class="slider-grid"></div>
+        </section>
+
+        <section class="card exports">
+          <h2>Export</h2>
+          <div class="buttons">
+            <button id="exp-patch">Patch JSON</button>
+            <button id="exp-midi">MIDI</button>
+            <button id="exp-wav">Tweaked WAV</button>
+            <button id="exp-notes">Notes JSON</button>
+            <label class="button">Import patch<input type="file" id="imp-patch" accept=".json,application/json" hidden></label>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

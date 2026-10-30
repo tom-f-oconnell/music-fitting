@@ -1,0 +1,21 @@
+[project]
+name = "musicfit"
+version = "0.1.0"
+description = "Fit a differentiable synthesizer and a MIDI-like note sequence to electronic music audio; build training sets from YouTube."
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1", "numpy", "soundfile", "requests"]
+
+[project.optional-dependencies]
+dataset = ["yt-dlp"]
+web = ["fastapi", "uvicorn", "python-multipart"]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["musicfit*"]
+
+[tool.setuptools.package-data]
+"musicfit.web" = ["static/*"]
+
+[tool.pytest.ini_options]
+markers = ["network: tests that need internet access (deselected by default)"]
+addopts = "-m 'not network'"
