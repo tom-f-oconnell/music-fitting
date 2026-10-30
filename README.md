@@ -28,7 +28,9 @@ scripts/
 tests/
 ```
 
-Install: `pip install -r requirements.txt` (CPU PyTorch is fine; `ffmpeg` must be on `PATH`).
+Install: `pip install -r requirements.txt` (`ffmpeg` must be on `PATH`). Fits run on a CUDA GPU
+when one is available (`FitConfig.device = "auto"`; `--device cpu` on the scripts to override), and
+CPU PyTorch works too, just 10–35× slower.
 
 Quick start for the web app:
 
@@ -53,7 +55,9 @@ function of its parameters:
 The filter is applied per harmonic as a magnitude response evaluated at control
 rate (every 32 samples) and interpolated, instead of a recursive IIR, so
 back-propagation never runs through a sample recursion. The whole render for a
-3 s clip at 16 kHz takes ~0.2–0.5 s forward+backward on a laptop CPU.
+3 s clip at 16 kHz takes ~0.3–0.4 s forward+backward on a 48-core CPU and
+~0.02 s on an RTX 3090 (10 s clip: 1–4 s vs. 0.05–0.08 s, 8.6 GiB peak GPU
+memory).
 
 Notes come in two representations (`notes.py`):
 
@@ -250,5 +254,6 @@ the MIDI writer and a tiny end-to-end fit.
   filter envelope depth.
 * The filter is a magnitude-only approximation applied per harmonic; there is
   no self-oscillation, and the noise component is not filtered.
-* Everything runs on CPU in a few minutes for 3–4 s clips; a GPU and
-  `n_harmonics`/`pitch range` reductions make longer clips feasible.
+* GPU memory grows with clip length × (pitches or notes) × harmonics: about
+  2 GiB for a 3 s clip and 8.6 GiB for 10 s with 49 pitches and 32
+  harmonics. Reduce `n_harmonics` or the pitch range for longer clips.

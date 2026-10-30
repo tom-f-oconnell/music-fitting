@@ -32,13 +32,15 @@ def main():
     ap.add_argument("--note-steps", type=int, default=300)
     ap.add_argument("--sparsity", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="auto", help="auto (CUDA if available), cpu, cuda, ...")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     target = load_audio(args.audio, args.sr, args.offset, args.duration)
     target = target / (target.abs().max() + 1e-8) * 0.5
     cfg = FitConfig(sr=args.sr, n_voices=args.voices, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
-                    roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed)
+                    roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed,
+                    device=args.device)
     res = fit(target, cfg)
 
     save_audio(os.path.join(args.out, "target.wav"), target, args.sr)

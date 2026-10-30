@@ -27,13 +27,15 @@ def main():
     ap.add_argument("--notes", type=int, default=10)
     ap.add_argument("--roll-steps", type=int, default=400)
     ap.add_argument("--note-steps", type=int, default=300)
+    ap.add_argument("--device", default="auto", help="auto (CUDA if available), cpu, cuda, ...")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     sr = 16000
     target, ref, true_params = synthetic_target(args.seed, args.length, args.notes, sr)
 
-    cfg = FitConfig(sr=sr, roll_steps=args.roll_steps, note_steps=args.note_steps, seed=args.seed)
+    cfg = FitConfig(sr=sr, roll_steps=args.roll_steps, note_steps=args.note_steps, seed=args.seed,
+                    device=args.device)
     res = fit(target, cfg)
 
     roll_m = note_metrics(res.roll_notes, ref)

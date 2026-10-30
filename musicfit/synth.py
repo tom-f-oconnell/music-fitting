@@ -255,10 +255,10 @@ class Synth(nn.Module):
         self._sin_cache: dict = {}
 
     def _white_noise(self, n: int, device) -> torch.Tensor:
-        if self._noise is None or self._noise.shape[0] < n:
+        if self._noise is None or self._noise.shape[0] < n or self._noise.device != torch.device(device):
             g = torch.Generator().manual_seed(self.noise_seed)
-            self._noise = torch.randn(n, generator=g) * 0.3
-        return self._noise[:n].to(device)
+            self._noise = (torch.randn(n, generator=g) * 0.3).to(device)
+        return self._noise[:n]
 
     def render_partials(
         self,
@@ -316,8 +316,9 @@ class Synth(nn.Module):
             phase = 2 * math.pi * f * t
         else:
             phase = 2 * math.pi * f * (t - phase_ref.to(torch.float64)[:, None, None])
-        phase = torch.remainder(phase, 2 * math.pi)
-        return torch.sin(phase).to(torch.float32)
+        # wrapped phase is fine in float32; sin in float32 halves what autograd keeps
+        phase = torch.remainder(phase, 2 * math.pi).to(torch.float32)
+        return torch.sin(phase)
 
     def effects(self, p: dict[str, torch.Tensor], x: torch.Tensor) -> torch.Tensor:
         x = soft_drive(x, p["drive"])

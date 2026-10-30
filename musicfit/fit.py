@@ -48,6 +48,7 @@ class FitConfig:
     lr_decay: float = 0.1  # final/initial learning-rate ratio (linear decay within each stage)
     log_every: int = 50
     seed: int = 0
+    device: str = "auto"  # "auto" (CUDA if available), "cpu", "cuda", "cuda:1", ...
 
 
 @dataclass
@@ -70,6 +71,12 @@ def _initial_patch(voice: int) -> SynthParams:
     return SynthParams(values, wave)
 
 
+def resolve_device(device: str) -> torch.device:
+    if device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
+
+
 def _linear_decay(opt, n_steps: int, final_ratio: float):
     return torch.optim.lr_scheduler.LambdaLR(opt, lambda i: 1.0 - (1.0 - final_ratio) * min(i, n_steps) / max(n_steps, 1))
 
@@ -88,21 +95,27 @@ def fit(
     progress: Callable[[dict], None] | None = None,
 ) -> FitResult:
     """Run both stages.  `progress`, if given, is called after every step with
-    {"stage", "step", "total", "loss"}; raising from it aborts the fit."""
+    {"stage", "step", "total", "loss"}; raising from it aborts the fit.
+
+    The fit runs on ``config.device``; the returned synths are left there, and
+    the returned audio is on the CPU.
+    """
     cfg = config or FitConfig()
     report = progress or (lambda info: None)
     torch.manual_seed(cfg.seed)
     gen = torch.Generator().manual_seed(cfg.seed)
-    target = target.float()
+    device = resolve_device(cfg.device)
+    target = target.float().to(device)
     T = target.shape[-1]
     n_frames = int(math.ceil(T / (cfg.frame_hop_s * cfg.sr)))
     loss_fn = MultiResolutionSTFTLoss(cfg.fft_sizes)
     history: list[dict] = []
     t0 = time.time()
 
-    synths = [Synth(cfg.sr, cfg.n_harmonics, params=_initial_patch(v), noise_seed=v) for v in range(cfg.n_voices)]
+    synths = [Synth(cfg.sr, cfg.n_harmonics, params=_initial_patch(v), noise_seed=v).to(device)
+              for v in range(cfg.n_voices)]
     rolls = [
-        PianoRoll(n_frames, cfg.pitch_min, cfg.pitch_max, cfg.frame_hop_s, generator=gen)
+        PianoRoll(n_frames, cfg.pitch_min, cfg.pitch_max, cfg.frame_hop_s, generator=gen).to(device)
         for _ in range(cfg.n_voices)
     ]
 
@@ -133,7 +146,7 @@ def fit(
         print(f"decoded {len(roll_notes)} notes from the piano roll", flush=True)
 
     # ---- stage 2: explicit notes ---------------------------------------------
-    seqs = [NoteSequence([n for n in roll_notes if n.voice == v] or [Note(60.0, 0.0, 0.1, 0.02, v)])
+    seqs = [NoteSequence([n for n in roll_notes if n.voice == v] or [Note(60.0, 0.0, 0.1, 0.02, v)]).to(device)
             for v in range(cfg.n_voices)]
     groups = [{"params": list(s.params.parameters()), "lr": cfg.synth_lr_stage2} for s in synths]
     for q in seqs:
@@ -161,11 +174,11 @@ def fit(
     notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     notes.sort(key=lambda n: (n.onset, n.pitch))
     with torch.no_grad():
-        final_seqs = [NoteSequence([n for n in notes if n.voice == v]) for v in range(cfg.n_voices)]
+        final_seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
         audio = sum(q.render(s, T) for q, s in zip(final_seqs, synths))
         final_loss = float(loss_fn(audio, target))
     _log(history, "final", 0, final_loss, {"n_notes": len(notes)}, t0, verbose)
-    return FitResult(synths, notes, audio.detach(), history, roll_notes)
+    return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes)
 
 
 def note_metrics(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict:

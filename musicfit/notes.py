@@ -87,7 +87,7 @@ class PianoRoll(nn.Module):
                 mass = float(w.sum())
                 if mass < threshold:
                     continue
-                frames = torch.arange(lo, hi, dtype=torch.float32)
+                frames = torch.arange(lo, hi, dtype=torch.float32, device=v.device)
                 onset = float((w * frames).sum() / w.sum()) * self.frame_hop_s
                 notes.append(Note(float(self.pitches[pi]), onset, dur, min(mass, 1.0), voice))
         notes.sort(key=lambda n: (n.onset, n.pitch))
