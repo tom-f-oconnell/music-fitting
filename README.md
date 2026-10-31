@@ -31,13 +31,24 @@ Then open http://localhost:8000.
   value; double-click resets it. Changes re-render within a second. Click a
   note to mute it. Drums and other unpitched sound are fitted separately and
   stay in every re-render unless you tick *Mute drums & noise*.
+* **Mono lead or acid line:** under Advanced, this also fits slides between
+  notes and more harmonics, and takes about two-thirds longer.
 * **Export:** patch JSON (re-importable), MIDI, notes JSON, and the WAV.
 
-It works best on short, sparse synth lines. Real tracks fit much better than
-they did (tuning and drums are now handled) but still roughly: rich, detuned
-or acid timbres are the main gap (see [design.md](design.md#real-recordings)). A fit takes about a
+It works best on short, sparse synth lines. On its own it finds few of the
+notes in busy music, so for anything dense install the two optional helpers
+below and tick *Start from an automatic transcription* under Advanced (see
+[design.md](design.md#real-recordings) for measurements). A fit takes about a
 minute on an NVIDIA GPU, which is used automatically, and several minutes on
 a CPU. There is no login, so only run the app on your own machine.
+
+**Optional helpers for busy music** (Advanced shows their checkboxes once they
+are installed; Demucs downloads its model the first time it runs):
+
+```
+venv/bin/pip install -r requirements-tools.txt
+venv/bin/pip install --no-deps basic-pitch
+```
 
 ## Command line and configuration
 
@@ -46,6 +57,7 @@ python scripts/fit_audio.py clip.opus --offset 10 --duration 4 --voices 2 --out 
 python scripts/demo_fit_synthetic.py --out demo_out      # synthetic target, prints note P/R and patch
 python scripts/eval_synthetic.py --seeds 1-24 --out eval_out/base.json                # 24 targets, mean P/R/F1
 python scripts/eval_synthetic.py --set prune_tol=0.005 --compare eval_out/base.json   # paired comparison
+python scripts/eval_slakh.py --source mix --out eval_out/slakh_mix.json               # scored against real notes
 ```
 
 `fit_audio.py` writes `target.wav`, `fit.wav`, `noise.wav` (the fitted drums
@@ -54,20 +66,30 @@ tuning, drum hits). Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
 `--roll-steps`, `--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer
 spurious notes, lower if notes go missing), `--drum-kinds` (unpitched sounds to
 fit, default 3; 0 for none), `--noise-floor`, `--seed`, `--device` (`auto`,
-`cpu`, `cuda`, ...). The recording's tuning offset from A440 is estimated
+`cpu`, `cuda`, ...), `--lead` (for a mono lead or acid line: fit slides between
+notes, with 128 harmonics). With the optional helpers: `--basic-pitch` starts
+from a transcription instead of finding notes itself, and keeps all its notes,
+and `--separate` splits off the drums with Demucs and fits notes and drums each
+to their own stem. The recording's tuning offset from A440 is estimated
 automatically.
 `eval_synthetic.py` fits many synthetic targets (in parallel on a GPU, ~5 min
 for 24) with any `FitConfig` overrides (`--set field=value`), optionally with
 things real recordings have and the synth can't make (`--mismatch
-tuning=25`, `unison`, `noise`, `drums`, `codec`); use it rather than single fits
-to judge a change (see [design.md](design.md#evaluation-on-synthetic-targets)).
+tuning=25`, `unison`, `noise`, `drums`, `codec`) or on a 303-style line
+(`--target acid`); use it rather than single fits to judge a change (see
+[design.md](design.md#evaluation-on-synthetic-targets)).
+`eval_slakh.py` scores against the true notes of
+[BabySlakh](https://zenodo.org/records/4603870) (20 songs rendered from MIDI, 883
+MB; its docstring has the download), on mixes or one instrument (`--source`),
+with `--method fit`, `basic-pitch` or `fit+basic-pitch`, and `--separate`.
 From Python, `musicfit.fit.fit(audio_tensor, FitConfig(...))`; `FitConfig`
 documents every knob.
 
 **Web app:** `MUSICFIT_JOBS=/path` sets where jobs are stored (default
 `./web_jobs`). HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
 `POST /api/jobs` (multipart: `file`, `offset`, `duration`, `voices`,
-`roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`),
+`roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,
+`separate`, `basic_pitch`; the last two only if `tools` in `/api/specs` says they are installed),
 `POST /api/jobs/demo`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `DELETE /api/jobs/{id}`, `GET /api/jobs/{id}/audio/{target|fit}.wav`,
 `POST /api/jobs/{id}/render` (`{patches, notes, muted_voices}` → WAV, loss in
@@ -96,20 +118,24 @@ terms and local law; this is for personal research use.
 ```
 musicfit/
   synth.py        differentiable subtractive synth (PyTorch)
+  drums.py        unpitched voice: drum kinds from an onset roll, noise floor
   notes.py        soft piano roll, explicit note list, MIDI writer
-  loss.py         multi-resolution STFT loss
+  loss.py         multi-resolution STFT loss, expected spectrum of a detuned unison
+  tuning.py       the recording's offset from A440
   fit.py          two-stage joint fitting procedure
+  tools.py        optional Demucs and basic-pitch, and fitting with them
   audio_io.py     ffmpeg-based loading, wav saving
-  synthetic.py    random melody + random patch targets (ground truth known)
+  synthetic.py    synthetic targets with known notes: random melodies, 303-style lines
+  slakh.py        BabySlakh clips with their true notes
   web/            FastAPI app (app.py), background jobs (jobs.py), fast re-render (render.py), static/ UI
   dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py)
-scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, build_aphex_twin_dataset.py
+scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, eval_slakh.py, build_aphex_twin_dataset.py
 tests/
 ```
 
 [design.md](design.md) describes how the synth and the fitter work, the
-evaluation on synthetic targets (and why single runs are misleading), what
-was tried, the dataset matching rules, and the open problems.
+evaluation on synthetic targets and BabySlakh (and why single runs are
+misleading), what was tried, the dataset matching rules, and the open problems.
 
 ```
 venv/bin/python -m pytest             # unit tests (network tests deselected)
