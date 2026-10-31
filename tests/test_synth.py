@@ -51,13 +51,13 @@ def test_render_notes_and_roll_agree():
 def test_gradients_reach_everything():
     synth = Synth(SR, n_harmonics=8)
     notes = [Note(60.0, 0.1, 0.2, 0.7), Note(64.0, 0.4, 0.2, 0.5)]
-    seq = NoteSequence(notes)
+    seq = NoteSequence(notes, glides=True)
     target = torch.randn(SR) * 0.1
     loss = MultiResolutionSTFTLoss((512, 128))(seq.render(synth, SR), target)
     loss.backward()
     for name, p in list(synth.named_parameters()) + list(seq.named_parameters()):
-        assert p.grad is not None and torch.isfinite(p.grad).all(), name
-    for name in ("onset", "log_duration", "vel_logit", "detune_raw"):
+        assert not p.requires_grad or (p.grad is not None and torch.isfinite(p.grad).all()), name
+    for name in ("onset", "log_duration", "vel_logit", "detune_raw", "slide_logit"):
         assert getattr(seq, name).grad.abs().sum() > 0, name
     roll = PianoRoll(100, 55, 65, 0.01)
     loss = MultiResolutionSTFTLoss((512, 128))(roll.render(synth, SR), target)

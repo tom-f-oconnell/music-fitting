@@ -12,6 +12,8 @@ settings on many targets, paired by target:
 --set roll_steps=150). --mismatch adds something the synth can't produce to every
 target (tuning/unison in cents, noise/drums in dB re the peak, codec in kbit/s; see
 musicfit.synthetic.synthetic_target), e.g. --mismatch tuning=30 --mismatch noise=-40.
+--target acid fits a 303-style line from a separate time-domain synth instead of a
+melody from our own. --basic-pitch starts stage 2 from a transcription (musicfit.tools).
 Seed s renders synthetic target s (same melody and patch with or without
 mismatch) and also seeds the fit.
 Targets are fitted in parallel processes (--jobs: default 5 on a GPU, 1 on a CPU,
@@ -26,6 +28,7 @@ notes and the true and fitted patches.
 """
 
 import argparse
+import gc
 import json
 import multiprocessing as mp
 import os
@@ -40,26 +43,36 @@ import torch  # noqa: E402
 
 from musicfit.fit import FitConfig, fit, match_notes, note_metrics  # noqa: E402
 from musicfit.notes import Note  # noqa: E402
-from musicfit.synthetic import synthetic_target  # noqa: E402
+from musicfit.synthetic import acid_target, synthetic_target  # noqa: E402
 
 
 def fit_target(args) -> dict:
-    seed, overrides, mismatch, length, n_notes, threads = args
+    seed, overrides, mismatch, length, n_notes, threads, kind, use_basic_pitch = args
     torch.set_num_threads(threads)
     cfg = FitConfig(seed=seed, **overrides)
-    target, ref, true_patch = synthetic_target(seed, length, n_notes, cfg.sr, mismatch)
+    if kind == "acid":
+        target, ref, true_patch = acid_target(seed, length, cfg.sr, mismatch.get("drums"))
+    else:
+        target, ref, true_patch = synthetic_target(seed, length, n_notes, cfg.sr, mismatch)
     t0 = time.time()
-    res = fit(target, cfg, verbose=False)
+    if use_basic_pitch:
+        from musicfit.tools import fit_with_tools
+
+        res = fit_with_tools(target, cfg, use_basic_pitch=True, verbose=False)
+    else:
+        res = fit(target, cfg, verbose=False)
     return {
         "seed": seed,
         "time_s": round(time.time() - t0, 1),
         "final_loss": res.history[-1]["loss"],
+        "spread_searched": res.history[-1].get("spread_searched", 0.0),
+        "spread_kept": res.spread_cents,
         **note_metrics(res.notes, ref),
         "roll_metrics": note_metrics(res.roll_notes, ref),
         "ref_notes": [n.as_dict() for n in ref],
         "roll_notes": [n.as_dict() for n in res.roll_notes],
         "notes": [n.as_dict() for n in res.notes],
-        "true_patch": true_patch.describe(),
+        "true_patch": true_patch if kind == "acid" else true_patch.describe(),
         "fitted_patches": [s.params.describe() for s in res.synths],
     }
 
@@ -106,12 +119,78 @@ def _notes(items: list[dict]) -> list[Note]:
     return [Note(**d) for d in items]
 
 
+class RetryOnGpuMemory:
+    """Wraps a worker to give GPU memory back after each target, and to wait and retry when
+    other fits have filled it: some targets need far more than others."""
+
+    def __init__(self, worker, tries: int = 8, wait_s: float = 45.0):
+        self.worker, self.tries, self.wait_s = worker, tries, wait_s
+
+    def __call__(self, task):
+        for attempt in range(self.tries):
+            try:
+                return self.worker(task)
+            except torch.cuda.OutOfMemoryError:
+                if attempt == self.tries - 1:
+                    raise
+                time.sleep(self.wait_s)
+            finally:
+                gc.collect()
+                torch.cuda.empty_cache()
+
+
+def run_targets(worker, tasks: list, jobs: int) -> list[dict]:
+    """Run worker over tasks in `jobs` spawned processes, printing a line per finished target."""
+    rows = []
+    with mp.get_context("spawn").Pool(jobs) as pool:
+        for r in pool.imap(RetryOnGpuMemory(worker), tasks):
+            rows.append(r)
+            rm = r["roll_metrics"]
+            print(f"seed {r['seed']:3d}: P {r['precision']:.2f} R {r['recall']:.2f} F1 {r['f1']:.2f} "
+                  f"({r['tp']}/{r['n_ref']} found, {r['n_pred']} predicted; stage 1 F1 {rm['f1']:.2f}) "
+                  f"loss {r['final_loss']:.3f}, {r['time_s']} s", flush=True)
+    return rows
+
+
+def summarize(rows: list[dict]) -> dict:
+    """Print and return the mean precision/recall/F1/loss over targets."""
+    mean = {k: statistics.mean(r[k] for r in rows) for k in ("precision", "recall", "f1", "final_loss")}
+    mean["roll_f1"] = statistics.mean(r["roll_metrics"]["f1"] for r in rows)
+    print(f"\nmean over {len(rows)} targets: P {mean['precision']:.3f} R {mean['recall']:.3f} F1 {mean['f1']:.3f} "
+          f"(stage 1 F1 {mean['roll_f1']:.3f}), loss {mean['final_loss']:.3f}; "
+          f"{sum(r['n_pred'] for r in rows)} notes predicted, {sum(r['n_ref'] for r in rows)} real")
+    return mean
+
+
+def compare_f1(rows: list[dict], path: str | None) -> None:
+    """Print the mean F1 difference against an earlier results file, paired by target."""
+    if not path:
+        return
+    before = {r["seed"]: r for r in json.load(open(path))["rows"]}
+    diff = [r["f1"] - before[r["seed"]]["f1"] for r in rows if r["seed"] in before]
+    if len(diff) >= 2:
+        se = statistics.stdev(diff) / len(diff) ** 0.5
+        print(f"F1 vs {path}: {statistics.mean(diff):+.3f} ± {se:.3f} (SE, {len(diff)} paired targets), "
+              f"better on {sum(d > 0 for d in diff)}, worse on {sum(d < 0 for d in diff)}")
+
+
+def save_results(path: str | None, results: dict) -> None:
+    if path:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(results, f, indent=1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seeds", default="1-24", help="a range like 1-24, or one seed")
     ap.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE", help="override a FitConfig field")
     ap.add_argument("--mismatch", action="append", default=[], metavar="KIND=VALUE",
                     help="add tuning/unison/noise/drums/codec to the targets")
+    ap.add_argument("--target", default="melody", choices=("melody", "acid"),
+                    help="melody: rendered with our synth; acid: 303-style line from a separate time-domain synth "
+                         "(of the mismatches, only drums applies)")
+    ap.add_argument("--basic-pitch", action="store_true", help="start stage 2 from a basic-pitch transcription")
     ap.add_argument("--length", type=float, default=3.0, help="target length in seconds")
     ap.add_argument("--notes", type=int, default=10, help="notes per target (plus dyads)")
     ap.add_argument("--jobs", type=int, default=None, help="parallel fits (default 5 on a GPU, else 1)")
@@ -127,41 +206,19 @@ def main():
     on_gpu = torch.cuda.is_available() and overrides.get("device", "auto") != "cpu"
     jobs = args.jobs or (5 if on_gpu else 1)
     threads = max(1, (os.cpu_count() or 1) // jobs)
-    tasks = [(s, overrides, mismatch, args.length, args.notes, threads) for s in seeds]
+    tasks = [(s, overrides, mismatch, args.length, args.notes, threads, args.target, args.basic_pitch) for s in seeds]
 
-    rows = []
-    with mp.get_context("spawn").Pool(jobs) as pool:
-        for r in pool.imap(fit_target, tasks):
-            rows.append(r)
-            rm = r["roll_metrics"]
-            print(f"seed {r['seed']:3d}: P {r['precision']:.2f} R {r['recall']:.2f} F1 {r['f1']:.2f} "
-                  f"({r['tp']}/{r['n_ref']} found, {r['n_pred']} predicted; stage 1 F1 {rm['f1']:.2f}) "
-                  f"loss {r['final_loss']:.3f}, {r['time_s']} s", flush=True)
+    rows = run_targets(fit_target, tasks, jobs)
+    mean = summarize(rows)
 
-    mean = {k: statistics.mean(r[k] for r in rows) for k in ("precision", "recall", "f1", "final_loss")}
-    mean["roll_f1"] = statistics.mean(r["roll_metrics"]["f1"] for r in rows)
-    print(f"\nmean over {len(rows)} targets: P {mean['precision']:.3f} R {mean['recall']:.3f} F1 {mean['f1']:.3f} "
-          f"(stage 1 F1 {mean['roll_f1']:.3f}), loss {mean['final_loss']:.3f}; "
-          f"{sum(r['n_pred'] for r in rows)} notes predicted, {sum(r['n_ref'] for r in rows)} real")
-
-    if args.kinds:
+    if args.kinds and args.target == "melody":
         kinds = sum((classify_false_positives(_notes(r["ref_notes"]), _notes(r["notes"]), r["true_patch"])
                      for r in rows), Counter())
         print(f"spurious notes: {sum(kinds.values())}", dict(kinds.most_common()))
 
-    if args.compare:
-        before = {r["seed"]: r for r in json.load(open(args.compare))["rows"]}
-        diff = [r["f1"] - before[r["seed"]]["f1"] for r in rows if r["seed"] in before]
-        if len(diff) >= 2:
-            se = statistics.stdev(diff) / len(diff) ** 0.5
-            print(f"F1 vs {args.compare}: {statistics.mean(diff):+.3f} ± {se:.3f} (SE, {len(diff)} paired targets), "
-                  f"better on {sum(d > 0 for d in diff)}, worse on {sum(d < 0 for d in diff)}")
-
-    if args.out:
-        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-        with open(args.out, "w") as f:
-            json.dump({"overrides": overrides, "mismatch": mismatch, "length": args.length, "notes": args.notes,
-                       "mean": mean, "rows": rows}, f, indent=1)
+    save_results(args.out, {"overrides": overrides, "mismatch": mismatch, "length": args.length, "notes": args.notes,
+                            "target": args.target, "mean": mean, "rows": rows})
+    compare_f1(rows, args.compare)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 import torch
@@ -39,11 +39,13 @@ class FitConfig:
     # the target (used if the estimate's consistency is at least tuning_min_confidence, else 0)
     tuning_cents: float | str = "auto"
     tuning_min_confidence: float = 0.2
+    # detuned unison: candidate spreads in cents, searched during the fit (loss.unison_spectrum); empty: off
+    spread_grid: tuple = (0, 5, 10, 15, 25, 40)
     # stage 1
     roll_steps: int = 400
     roll_lr: float = 0.1
     synth_lr: float = 0.03
-    sparsity: float = 1.0  # L1 weight on roll mass per frame, reached after sparsity_warmup
+    sparsity: float = 0.5  # L1 weight on roll mass per frame, reached after sparsity_warmup
     sparsity_warmup: float = 0.5  # fraction of roll_steps over which the L1 weight ramps up from 0
     decode_threshold: float = 0.3
     # unpitched sounds (drums.NoiseVoice): drum kinds triggered by an onset roll, and a noise floor
@@ -51,9 +53,11 @@ class FitConfig:
     noise_floor: bool = False
     drum_sparsity: float = 5.0  # multiplies `sparsity` for the drum roll: hits should be few and strong
     drum_start: float = 0.25  # fraction of roll_steps before the drums join (pitched content first; see design.md)
-    # stage 2
+    # stage 2; a faster onset rate drifts notes off the onsets stage 1 found (design.md)
     note_steps: int = 300
-    note_lrs: dict = field(default_factory=lambda: {"onset": 0.003, "duration": 0.03, "velocity": 0.05, "detune": 0.02})
+    note_lrs: dict = field(default_factory=lambda: {"onset": 0.001, "duration": 0.03, "velocity": 0.05, "detune": 0.02,
+                                                    "slide": 0.05})
+    glides: bool = False  # fit a portamento from the previous note per note (for mono leads)
     synth_lr_stage2: float = 0.01
     note_sparsity: float = 3.0  # L1 weight on note velocities (sum / n_frames, like the stage-1 penalty)
     prune_velocity: float = 0.05
@@ -75,6 +79,13 @@ class FitResult:
     roll_notes: list[Note]
     tuning_cents: float = 0.0  # pitch-grid offset used in stage 1
     noise: NoiseVoice | None = None  # drums / noise floor, if fitted (its render is part of audio)
+    spread_cents: float = 0.0  # detuned-unison spread found by the search (cfg.spread_grid)
+
+
+def lead_settings() -> dict:
+    """FitConfig fields for a mono lead or acid line: a portamento per note, and enough
+    harmonics that a bright low note isn't cut off at 2 kHz (design.md)."""
+    return {"glides": True, "n_harmonics": 128}
 
 
 def _initial_patch(voice: int) -> SynthParams:
@@ -123,8 +134,9 @@ def _render_subset(notes: list[Note], synths: list[Synth], keep: list[bool], T: 
     out = torch.zeros(T, device=device) if background is None else background.clone()
     for v, synth in enumerate(synths):
         vn = [n for n, k in zip(notes, keep) if k and n.voice == v]
+        glide = torch.tensor([n.glide for n in vn], device=device) if any(n.glide for n in vn) else None
         out = out + synth.render_notes(*(torch.tensor([getattr(n, a) for n in vn], device=device)
-                                         for a in ("pitch", "onset", "duration", "velocity")), T)
+                                         for a in ("pitch", "onset", "duration", "velocity")), T, glide)
     return out
 
 
@@ -165,12 +177,17 @@ def fit(
     config: FitConfig | None = None,
     verbose: bool = True,
     progress: Callable[[dict], None] | None = None,
+    init_notes: list[Note] | None = None,
 ) -> FitResult:
     """Run both stages.  `progress`, if given, is called after every step with
     {"stage", "step", "total", "loss"}; raising from it aborts the fit.
 
     The fit runs on ``config.device``; the returned synths are left there, and
     the returned audio is on the CPU.
+
+    With ``init_notes`` (e.g. from a transcriber) there is no stage 1: the patch
+    and drums are fitted to those notes for ``roll_steps // 4`` steps, then stage
+    2 starts from them.  ``n_voices = 0`` fits only the drums.
     """
     cfg = config or FitConfig()
     report = progress or (lambda info: None)
@@ -205,62 +222,80 @@ def fit(
     render_noise = (lambda: noise.render(T)) if noise is not None else (lambda: 0.0)
     noise_mass = (lambda: cfg.drum_sparsity * noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
 
-    # ---- stage 1: soft piano roll -------------------------------------------
-    opt = torch.optim.Adam(
-        [{"params": list(r.parameters()), "lr": cfg.roll_lr} for r in rolls]
-        + [{"params": list(s.params.parameters()), "lr": cfg.synth_lr} for s in synths]
-        + _noise_groups(noise, cfg.roll_lr, cfg.synth_lr)
-    )
-    sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
-    for step in range(cfg.roll_steps + 1):
-        drums_on = noise is not None and step >= cfg.drum_start * cfg.roll_steps
-        pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + (render_noise() if drums_on else 0.0)
-        spec = loss_fn(pred, target)
-        sparse = sum(r.strengths().sum(0).mean() for r in rolls)  # mean active mass per frame
-        ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
-        loss = spec + ramp * cfg.sparsity * sparse
-        if drums_on:
-            drum_mass = noise_mass()
-            sparse = sparse + drum_mass
-            loss = loss + ramp * cfg.sparsity * drum_mass
-        report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec.item()})
-        if step % cfg.log_every == 0 or step == cfg.roll_steps:
-            _log(history, "roll", step, spec.item(), {"mass_per_frame": sparse.item()}, t0, verbose)
-        if step == cfg.roll_steps:
-            break
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        sched.step()
+    spread = 0.0
+    spread_steps = {cfg.roll_steps // 4, cfg.roll_steps // 2, 3 * cfg.roll_steps // 4}
 
-    roll_notes = [n for v, r in enumerate(rolls) for n in r.decode(cfg.decode_threshold, voice=v)]
-    if verbose:
-        print(f"decoded {len(roll_notes)} notes from the piano roll", flush=True)
+    # ---- stage 1: soft piano roll -------------------------------------------
+    if init_notes is None:
+        opt = torch.optim.Adam(
+            [{"params": list(r.parameters()), "lr": cfg.roll_lr} for r in rolls]
+            + [{"params": list(s.params.parameters()), "lr": cfg.synth_lr} for s in synths]
+            + _noise_groups(noise, cfg.roll_lr, cfg.synth_lr)
+        )
+        sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
+        for step in range(cfg.roll_steps + 1):
+            drums_on = noise is not None and step >= cfg.drum_start * cfg.roll_steps
+            pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + (render_noise() if drums_on else 0.0)
+            if cfg.spread_grid and step in spread_steps:
+                spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
+            spec = loss_fn(pred, target, spread)
+            sparse = sum((r.strengths().sum(0).mean() for r in rolls), torch.zeros((), device=device))  # mass per frame
+            ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
+            loss = spec + ramp * cfg.sparsity * sparse
+            if drums_on:
+                drum_mass = noise_mass()
+                sparse = sparse + drum_mass
+                loss = loss + ramp * cfg.sparsity * drum_mass
+            report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec.item()})
+            if step % cfg.log_every == 0 or step == cfg.roll_steps:
+                _log(history, "roll", step, spec.item(), {"mass_per_frame": sparse.item()}, t0, verbose)
+            if step == cfg.roll_steps:
+                break
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+
+        roll_notes = [n for v, r in enumerate(rolls) for n in r.decode(cfg.decode_threshold, voice=v)]
+        if verbose:
+            print(f"decoded {len(roll_notes)} notes from the piano roll", flush=True)
+    else:
+        roll_notes = [replace(n, pitch=n.pitch + tuning / 100, voice=min(n.voice, cfg.n_voices - 1))
+                      for n in init_notes]
 
     # ---- stage 2: explicit notes ---------------------------------------------
-    seqs = [NoteSequence([n for n in roll_notes if n.voice == v] or [Note(60.0, 0.0, 0.1, 0.02, v)]).to(device)
+    make_seq = lambda notes: NoteSequence(notes, glides=cfg.glides).to(device)  # noqa: E731
+    seqs = [make_seq([n for n in roll_notes if n.voice == v] or [Note(60.0, 0.0, 0.1, 0.02, v)])
             for v in range(cfg.n_voices)]
     total = stage2_steps(cfg)
 
-    def refine(seqs, n_steps, first_step, lr_scale=1.0):
+    def refine(seqs, n_steps, first_step, lr_scale=1.0, notes_frozen=False):
+        nonlocal spread
         groups = [{"params": list(s.params.parameters()), "lr": cfg.synth_lr_stage2 * lr_scale} for s in synths]
         groups += _noise_groups(noise, 0.1 * cfg.roll_lr * lr_scale, cfg.synth_lr_stage2 * lr_scale)
-        for q in seqs:
+        for q in seqs if not notes_frozen else ():
             groups += [
                 {"params": [q.onset], "lr": cfg.note_lrs["onset"] * lr_scale},
                 {"params": [q.log_duration], "lr": cfg.note_lrs["duration"] * lr_scale},
                 {"params": [q.vel_logit], "lr": cfg.note_lrs["velocity"] * lr_scale},
                 {"params": [q.detune_raw], "lr": cfg.note_lrs["detune"] * lr_scale},
             ]
+            if q.slide_logit is not None:
+                groups.append({"params": [q.slide_logit], "lr": cfg.note_lrs["slide"] * lr_scale})
         opt = torch.optim.Adam(groups)
         sched = _linear_decay(opt, n_steps, cfg.lr_decay)
         for i in range(n_steps + 1):
             step = first_step + i
             pred = sum(q.render(s, T) for q, s in zip(seqs, synths)) + render_noise()
-            loss = loss_fn(pred, target)
-            report({"stage": "notes", "step": step, "total": total, "loss": loss.item()})
+            if cfg.spread_grid and i == 0:
+                spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
+            loss = loss_fn(pred, target, spread)
+            # the warm-up with frozen notes stands in for stage 1, on the progress chart too
+            report({"stage": "roll" if notes_frozen else "notes", "step": step, "total": n_steps if notes_frozen else total,
+                    "loss": loss.item()})
             if step % cfg.log_every == 0 or i == n_steps:
-                _log(history, "notes", step, loss.item(), {"n_notes": sum(len(q) for q in seqs)}, t0, verbose)
+                _log(history, "roll" if notes_frozen else "notes", step, loss.item(),
+                     {"n_notes": sum(len(q) for q in seqs)}, t0, verbose)
             if i == n_steps:
                 break
             if cfg.note_sparsity:
@@ -271,24 +306,44 @@ def fit(
             opt.step()
             sched.step()
 
+    if init_notes is not None:
+        refine(seqs, cfg.roll_steps // 4, 0, lr_scale=cfg.synth_lr / cfg.synth_lr_stage2, notes_frozen=True)
     refine(seqs, cfg.note_steps, 0)
     notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     if cfg.prune_tol > 0:
         with torch.no_grad():
             background = render_noise() if noise is not None else None
-        notes = _prune_redundant(notes, synths, target, loss_fn, cfg.prune_tol, background)
+        notes = _prune_redundant(notes, synths, target, lambda a, b: loss_fn(a, b, spread), cfg.prune_tol, background)
         if verbose:
             print(f"{len(notes)} notes left after leave-one-out pruning", flush=True)
-        seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
+        seqs = [make_seq([n for n in notes if n.voice == v]) for v in range(cfg.n_voices)]
         refine(seqs, cfg.polish_steps, cfg.note_steps + 1, lr_scale=0.3)
         notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     notes.sort(key=lambda n: (n.onset, n.pitch))
-    with torch.no_grad():
-        final_seqs = [NoteSequence([n for n in notes if n.voice == v]).to(device) for v in range(cfg.n_voices)]
+
+    @torch.no_grad()
+    def render_final():
+        final_seqs = [make_seq([n for n in notes if n.voice == v]) for v in range(cfg.n_voices)]
         audio = sum(q.render(s, T) for q, s in zip(final_seqs, synths)) + render_noise()
-        final_loss = float(loss_fn(audio, target))
-    _log(history, "final", 0, final_loss, {"n_notes": len(notes)}, t0, verbose)
-    return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes, tuning, noise)
+        return audio, float(loss_fn(audio, target))
+
+    audio, final_loss = render_final()
+    extra = {"n_notes": len(notes)}
+    if spread:
+        # The search compared expected spectra. Real copies beat, so keep them only if they fit
+        # better as they are; the wider spectrum may just have made finding notes easier.
+        for s in synths:
+            s.params.set_value("unison_cents", spread)
+        unison_audio, unison_loss = render_final()
+        extra["loss_one_copy"], extra["spread_searched"] = final_loss, spread
+        if unison_loss < final_loss:
+            audio, final_loss = unison_audio, unison_loss
+        else:
+            spread = 0.0
+            for s in synths:
+                s.params.set_value("unison_cents", 0.0)
+    _log(history, "final", 0, final_loss, extra, t0, verbose)
+    return FitResult(synths, notes, audio.detach().cpu(), history, roll_notes, tuning, noise, spread)
 
 
 def match_notes(pred: list[Note], ref: list[Note], onset_tol: float = 0.05) -> dict[int, int]:

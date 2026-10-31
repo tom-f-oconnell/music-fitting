@@ -61,6 +61,8 @@ PARAM_SPECS: dict[str, ParamSpec] = {
     "cutoff": ParamSpec(40.0, 12000.0, 1500.0, log=True),
     "resonance": ParamSpec(0.5, 10.0, 1.0, log=True),
     "filt_env_amount": ParamSpec(0.0, 6.0, 1.5),
+    "glide_time": ParamSpec(0.005, 0.3, 0.05, log=True),
+    "unison_cents": ParamSpec(0.0, 60.0, 0.0),  # found by search, not by gradient: see NOT_TRAINED
     "noise_level": ParamSpec(0.0, 0.5, 0.01),
     "drive": ParamSpec(0.1, 8.0, 0.5, log=True),
     "delay_time": ParamSpec(0.05, 1.0, 0.25, log=True),
@@ -70,6 +72,11 @@ PARAM_SPECS: dict[str, ParamSpec] = {
     "reverb_mix": ParamSpec(0.0, 1.0, 0.05),
     "gain": ParamSpec(0.01, 10.0, 0.5, log=True),
 }
+
+
+# Spread of the three detuned copies: its gradient vanishes at 0 and it is only rendered once
+# the fit has settled (fit.py), so it isn't given to the optimiser.
+NOT_TRAINED = ("unison_cents",)
 
 
 def _logit(u: float, eps: float = 1e-4) -> float:
@@ -92,6 +99,8 @@ class SynthParams(nn.Module):
                 for name, spec in PARAM_SPECS.items()
             }
         )
+        for name in NOT_TRAINED:
+            self.raw[name].requires_grad_(False)
         # Waveform mixture weights (softmax over WAVEFORMS).  Default: mostly saw.
         weights = waveform or {"sine": 0.1, "saw": 0.6, "square": 0.2, "triangle": 0.1}
         w = torch.tensor([max(weights.get(n, 0.0), 1e-3) for n in WAVEFORMS])
@@ -101,6 +110,11 @@ class SynthParams(nn.Module):
         out = {name: spec.from_unit(torch.sigmoid(self.raw[name])) for name, spec in PARAM_SPECS.items()}
         out["waveform"] = torch.softmax(self.wave_logits, dim=0)
         return out
+
+    @torch.no_grad()
+    def set_value(self, name: str, value: float) -> None:
+        """Set a parameter from its value in physical units."""
+        self.raw[name].fill_(_logit(PARAM_SPECS[name].to_unit(value)))
 
     def describe(self) -> dict[str, object]:
         with torch.no_grad():
@@ -233,6 +247,26 @@ def midi_to_hz(m: torch.Tensor) -> torch.Tensor:
     return 440.0 * 2 ** ((m - 69.0) / 12.0)
 
 
+def glide_warp(t_rel: torch.Tensor, glide: torch.Tensor, glide_time: torch.Tensor, sr: int) -> torch.Tensor:
+    """Time warp that makes a note's pitch start off by `glide` and settle exponentially.
+
+    Instantaneous frequency f(t) = f0 * 2^(glide * exp(-t / glide_time) / 12), so the phase
+    is 2*pi*f0*(t + warp(t)) with warp the integral of the relative frequency deviation.
+
+    Args:
+        t_rel: [N, T] seconds since each note's onset.
+        glide: [N] pitch offset at note-on, in semitones.
+        glide_time: time constant of the glide, seconds.
+        sr: sample rate, the step of the numerical integral.
+
+    Returns:
+        [N, T] warp in seconds, float64.
+    """
+    started = t_rel >= 0
+    deviation = 2.0 ** (glide[:, None] * torch.exp(-t_rel.clamp(min=0.0) / glide_time) / 12.0) - 1.0
+    return torch.cumsum((deviation * started).to(torch.float64), dim=1) / sr
+
+
 class Synth(nn.Module):
     """One synth voice: trainable patch + fixed rendering settings."""
 
@@ -269,6 +303,7 @@ class Synth(nn.Module):
         filt_env: torch.Tensor,
         n_samples: int,
         cache_key=None,
+        time_warp: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sum of filtered, enveloped harmonic oscillators.
 
@@ -277,45 +312,48 @@ class Synth(nn.Module):
             None for phase reference 0 (lets the sinusoid table be cached).
         amp_env: [N, T] amplitude envelope (already includes velocity).
         filt_env: [N, T] filter envelope in [0, 1].
+        time_warp: [N, T] seconds added to each oscillator's elapsed time, for a
+            pitch that isn't constant (see glide_warp), or None.
         """
         sr, K, hop = self.sr, self.n_harmonics, self.control_hop
+        N = amp_env.shape[0]
         device = amp_env.device
         k = torch.arange(1, K + 1, device=device, dtype=torch.float32)
         freqs = f0[:, None] * k  # [N, K]
-        alias_mask = (freqs < 0.5 * sr * 0.95).to(freqs.dtype)
-        wave = waveform_harmonics(p["waveform"], K)  # [K]
+        # only partials below Nyquist exist, so low notes can afford many harmonics
+        note_i, harm_i = torch.nonzero(freqs.detach() < 0.5 * sr * 0.95, as_tuple=True)
+        fp = freqs[note_i, harm_i]  # [Np]
+        wave = waveform_harmonics(p["waveform"], K)[harm_i]
 
         # filter gains at control rate
         fenv_ctrl = filt_env[:, ::hop]  # [N, F]
         cutoff = p["cutoff"] * torch.pow(2.0, p["filt_env_amount"] * fenv_ctrl)
         cutoff = torch.clamp(cutoff, 20.0, 0.5 * sr)
-        H = lowpass_magnitude(freqs[:, :, None], cutoff[:, None, :], p["resonance"])  # [N, K, F]
-        G = wave[None, :, None] * alias_mask[:, :, None] * H
-        N = G.shape[0]
-        G = F.interpolate(G.reshape(1, N * K, -1), size=n_samples, mode="linear", align_corners=False)
-        G = G.reshape(N, K, n_samples)
+        H = lowpass_magnitude(fp[:, None], cutoff[note_i], p["resonance"])  # [Np, F]
+        G = F.interpolate((wave[:, None] * H)[None], size=n_samples, mode="linear", align_corners=False)[0]
 
-        sines = self._sinusoids(freqs, phase_ref, n_samples, cache_key)
-        osc = (G * sines).sum(dim=1)  # [N, T]
+        time_warp = time_warp[note_i] if time_warp is not None else None
+        sines = self._sinusoids(fp, phase_ref[note_i] if phase_ref is not None else None, time_warp, n_samples, cache_key)
+        osc = torch.zeros(N, n_samples, device=device).index_add(0, note_i, G * sines)  # [N, T]
         return (amp_env * osc).sum(dim=0)
 
-    def _sinusoids(self, freqs, phase_ref, n_samples, cache_key):
+    def _sinusoids(self, freqs, phase_ref, time_warp, n_samples, cache_key):
         if phase_ref is None and cache_key is not None:
             key = (cache_key, n_samples, freqs.shape)
             if key not in self._sin_cache:
                 self._sin_cache.clear()
-                self._sin_cache[key] = self._compute_sin(freqs.detach(), None, n_samples)
+                self._sin_cache[key] = self._compute_sin(freqs.detach(), None, None, n_samples)
             return self._sin_cache[key]
-        return self._compute_sin(freqs, phase_ref, n_samples)
+        return self._compute_sin(freqs, phase_ref, time_warp, n_samples)
 
-    def _compute_sin(self, freqs, phase_ref, n_samples):
+    def _compute_sin(self, freqs, phase_ref, time_warp, n_samples):
         # float64 phase: 2*pi*f*t gets large for long clips.
         t = torch.arange(n_samples, device=freqs.device, dtype=torch.float64) / self.sr
-        f = freqs.to(torch.float64)[:, :, None]
-        if phase_ref is None:
-            phase = 2 * math.pi * f * t
-        else:
-            phase = 2 * math.pi * f * (t - phase_ref.to(torch.float64)[:, None, None])
+        f = freqs.to(torch.float64)[:, None]  # [Np, 1]
+        elapsed = t[None] if phase_ref is None else t[None] - phase_ref.to(torch.float64)[:, None]
+        if time_warp is not None:
+            elapsed = elapsed + time_warp
+        phase = 2 * math.pi * f * elapsed
         # wrapped phase is fine in float32; sin in float32 halves what autograd keeps
         phase = torch.remainder(phase, 2 * math.pi).to(torch.float32)
         return torch.sin(phase)
@@ -335,8 +373,13 @@ class Synth(nn.Module):
         duration: torch.Tensor,
         velocity: torch.Tensor,
         n_samples: int,
+        glide: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Render a list of notes. pitch in (fractional) MIDI numbers, times in seconds."""
+        """Render a list of notes. pitch in (fractional) MIDI numbers, times in seconds.
+
+        glide: [N] semitones each note starts away from its pitch (portamento from the
+        previous note), settling with the patch's glide_time; None for no glides.
+        """
         p = self.params.values()
         if pitch.numel() == 0:
             return self.effects(p, torch.zeros(n_samples, device=p["gain"].device))
@@ -347,7 +390,16 @@ class Synth(nn.Module):
         amp = amp * velocity[:, None]
         fenv = adsr(t_rel, dur, p["filt_attack"], p["filt_decay"], p["filt_sustain"], p["filt_release"])
         fenv = fenv * velocity[:, None]
-        x = self.render_partials(p, midi_to_hz(pitch), onset, amp, fenv, n_samples)
+        warp = glide_warp(t_rel, glide, p["glide_time"], self.sr) if glide is not None else None
+        spread = float(p["unison_cents"])
+        if spread < 0.5:
+            x = self.render_partials(p, midi_to_hz(pitch), onset, amp, fenv, n_samples, time_warp=warp)
+        else:
+            # three copies, starting a few ms apart so their phases are unrelated; unrelated
+            # copies add in power, hence sqrt(3)
+            x = sum(self.render_partials(p, midi_to_hz(pitch + c * spread / 100), onset + shift, amp, fenv, n_samples,
+                                         time_warp=warp)
+                    for c, shift in ((-1, 0.0021), (0, 0.0), (1, 0.0037))) / math.sqrt(3)
         x = x + p["noise_level"] * amp.sum(0) * self._white_noise(n_samples, x.device)
         return self.effects(p, x)
 

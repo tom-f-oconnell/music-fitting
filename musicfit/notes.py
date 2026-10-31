@@ -19,6 +19,7 @@ class Note:
     duration: float  # seconds (gate length)
     velocity: float  # 0..1
     voice: int = 0
+    glide: float = 0.0  # semitones the note starts away from its pitch (portamento into it)
 
     def as_dict(self) -> dict:
         return {k: round(v, 4) if isinstance(v, float) else v for k, v in asdict(self).items()}
@@ -103,10 +104,12 @@ class NoteSequence(nn.Module):
     """Explicit list of notes with continuous, trainable onset/duration/velocity/fine pitch.
 
     Coarse pitch is fixed (it comes from the piano-roll stage); a bounded
-    detune of +/- max_detune semitones is learnable.
+    detune of +/- max_detune semitones is learnable.  With ``glides``, each note
+    also has a learnable slide in [0, 1]: the share of the interval from the
+    previous note that it starts away from its own pitch.
     """
 
-    def __init__(self, notes: list[Note], max_detune: float = 0.5):
+    def __init__(self, notes: list[Note], max_detune: float = 0.5, glides: bool = False, initial_slide: float = 0.1):
         super().__init__()
         self.max_detune = max_detune
         self.voice = notes[0].voice if notes else 0
@@ -116,6 +119,16 @@ class NoteSequence(nn.Module):
         self.log_duration = nn.Parameter(torch.tensor([math.log(max(n.duration, 0.02)) for n in notes]))
         vel = torch.tensor([min(max(n.velocity, 0.02), 0.98) for n in notes])
         self.vel_logit = nn.Parameter(torch.log(vel / (1 - vel)))
+        self.slide_logit = None
+        if glides:
+            previous = _previous_notes(notes)
+            slides = []
+            for n, j in zip(notes, previous):
+                interval = notes[j].pitch - n.pitch
+                slides.append(min(max(n.glide / interval, 1e-3), 0.99) if n.glide and interval else initial_slide)
+            slides = torch.tensor(slides, dtype=torch.float32)
+            self.slide_logit = nn.Parameter(torch.log(slides / (1 - slides)))
+            self.register_buffer("previous", torch.tensor(previous, dtype=torch.long))
 
     def __len__(self) -> int:
         return self.base_pitch.shape[0]
@@ -129,17 +142,41 @@ class NoteSequence(nn.Module):
     def velocity(self) -> torch.Tensor:
         return torch.sigmoid(self.vel_logit)
 
+    def glide(self) -> torch.Tensor | None:
+        """Semitones each note starts away from its pitch, or None without glides."""
+        if self.slide_logit is None:
+            return None
+        pitch = self.pitch()
+        return torch.sigmoid(self.slide_logit) * (pitch[self.previous] - pitch)
+
     def render(self, synth: Synth, n_samples: int) -> torch.Tensor:
-        return synth.render_notes(self.pitch(), self.onset, self.duration(), self.velocity(), n_samples)
+        return synth.render_notes(self.pitch(), self.onset, self.duration(), self.velocity(), n_samples, self.glide())
 
     @torch.no_grad()
     def to_notes(self, min_velocity: float = 0.0) -> list[Note]:
         out = []
-        for p, o, d, v in zip(self.pitch(), self.onset, self.duration(), self.velocity()):
+        glides = self.glide()
+        glides = glides.tolist() if glides is not None else [0.0] * len(self)
+        for p, o, d, v, g in zip(self.pitch(), self.onset, self.duration(), self.velocity(), glides):
             if float(v) >= min_velocity:
-                out.append(Note(float(p), float(o), float(d), float(v), self.voice))
+                out.append(Note(float(p), float(o), float(d), float(v), self.voice, g))
         out.sort(key=lambda n: (n.onset, n.pitch))
         return out
+
+
+def _previous_notes(notes: list[Note], min_gap: float = 0.02) -> list[int]:
+    """For each note, the index of the note it could slide from: the latest to start at least
+    min_gap earlier (of several together, the closest in pitch), or itself if there is none."""
+    previous = []
+    for i, n in enumerate(notes):
+        earlier = [j for j, q in enumerate(notes) if q.onset <= n.onset - min_gap]
+        if not earlier:
+            previous.append(i)
+            continue
+        latest = max(notes[j].onset for j in earlier)
+        together = [j for j in earlier if notes[j].onset >= latest - min_gap]
+        previous.append(min(together, key=lambda j: abs(notes[j].pitch - n.pitch)))
+    return previous
 
 
 # ---------------------------------------------------------------------------
