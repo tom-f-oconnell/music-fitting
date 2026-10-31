@@ -5,6 +5,7 @@
 
 Writes target.wav, fit.wav (all of it), noise.wav (the fitted drums and noise floor
 alone), notes.mid, notes.json and params.json (patches, tuning, drum hits).
+--separate and --basic-pitch need requirements-tools.txt (see musicfit/tools.py).
 """
 
 import argparse
@@ -17,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch  # noqa: E402
 
 from musicfit.audio_io import load_audio, save_audio  # noqa: E402
-from musicfit.fit import FitConfig, fit  # noqa: E402
+from musicfit.fit import FitConfig, fit, lead_settings  # noqa: E402
 from musicfit.notes import write_midi  # noqa: E402
 
 
@@ -37,6 +38,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--drum-kinds", type=int, default=3, help="unpitched drum kinds to fit (0: none)")
     ap.add_argument("--noise-floor", action="store_true", help="also fit a stationary noise floor")
+    ap.add_argument("--lead", action="store_true",
+                    help="for a mono lead or acid line: fit a portamento per note, with more harmonics")
+    ap.add_argument("--separate", action="store_true",
+                    help="split off the drums with Demucs first, and fit notes and drums each to their own stem")
+    ap.add_argument("--basic-pitch", action="store_true", help="start from a basic-pitch transcription, skipping stage 1")
     ap.add_argument("--device", default="auto", help="auto (CUDA if available), cpu, cuda, ...")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -45,8 +51,14 @@ def main():
     target = target / (target.abs().max() + 1e-8) * 0.5
     cfg = FitConfig(sr=args.sr, n_voices=args.voices, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
                     roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed,
-                    drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device)
-    res = fit(target, cfg)
+                    drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device,
+                    **(lead_settings() if args.lead else {}))
+    if args.separate or args.basic_pitch:
+        from musicfit.tools import fit_with_tools
+
+        res = fit_with_tools(target, cfg, args.separate, args.basic_pitch)
+    else:
+        res = fit(target, cfg)
 
     save_audio(os.path.join(args.out, "target.wav"), target, args.sr)
     save_audio(os.path.join(args.out, "fit.wav"), res.audio, args.sr)

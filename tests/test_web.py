@@ -13,6 +13,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from musicfit.notes import Note  # noqa: E402
 from musicfit.web.app import create_app  # noqa: E402
 
 
@@ -88,6 +89,35 @@ def test_upload_job(client, tmp_path):
     assert client.get("/api/jobs").json()[0]["id"] == job["id"]
     assert client.delete(f"/api/jobs/{job['id']}").status_code == 200
     assert client.get(f"/api/jobs/{job['id']}").status_code == 404
+
+
+def test_tools_are_offered_only_when_installed(client, monkeypatch):
+    assert set(client.get("/api/specs").json()["tools"]) == {"demucs", "basic_pitch"}
+    monkeypatch.setattr("musicfit.web.app.available_tools", lambda: {"demucs": False, "basic_pitch": False})
+    for option in ("separate", "basic_pitch"):
+        bad = client.post("/api/jobs", files={"file": ("x.wav", b"x", "audio/wav")}, data={"duration": "1", option: "on"})
+        assert bad.status_code == 422 and "requirements-tools" in bad.json()["detail"]
+
+
+def test_upload_job_with_tools(client, monkeypatch):
+    """The form's checkboxes reach fit_with_tools (with the tools themselves replaced)."""
+    sr = 16000
+    t = np.arange(int(0.8 * sr)) / sr
+    x = 0.3 * np.sin(2 * np.pi * 220 * t)
+    buf = io.BytesIO()
+    sf.write(buf, x, sr, format="WAV")
+    monkeypatch.setattr("musicfit.web.app.available_tools", lambda: {"demucs": True, "basic_pitch": True})
+    monkeypatch.setattr("musicfit.tools.separate", lambda audio, sr, device="auto": {
+        "drums": audio * 0.1, "bass": audio * 0.3, "other": audio * 0.6})
+    monkeypatch.setattr("musicfit.tools.transcribe", lambda audio, sr: [Note(57.0, 0.1, 0.5, 0.8)])
+    job = client.post("/api/jobs", files={"file": ("tone.wav", buf.getvalue(), "audio/wav")},
+                      data={"duration": "0.8", "roll_steps": "8", "note_steps": "3", "pitch_min": "50", "pitch_max": "62",
+                            "separate": "on", "basic_pitch": "on", "lead": "on"}).json()
+    job = _wait(client, job["id"])
+    assert job["status"] == "done", job["error"]
+    assert [n["pitch"] for n in job["result"]["roll_notes"]] == [pytest.approx(57.0, abs=0.5)]
+    assert job["result"]["has_noise"] and job["result"]["n_harmonics"] == 128
+    assert client.delete(f"/api/jobs/{job['id']}").status_code == 200
 
 
 def test_rejects_bad_input(client):

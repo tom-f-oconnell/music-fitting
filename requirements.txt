@@ -8,3 +8,5 @@ fastapi
 uvicorn
 python-multipart
 httpx
+mido
+pyyaml

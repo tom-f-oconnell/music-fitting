@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ..notes import write_midi
 from ..synth import PARAM_SPECS, WAVEFORMS
+from ..tools import available_tools
 from .jobs import JobManager
 from .render import notes_from_dicts, render, spectral_loss, wav_bytes
 
@@ -29,15 +30,16 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 PARAM_GROUPS = [
     ("Amp envelope", ["amp_attack", "amp_decay", "amp_sustain", "amp_release"]),
     ("Filter", ["cutoff", "resonance", "filt_env_amount"]),
+    ("Glide & unison", ["glide_time", "unison_cents"]),
     ("Filter envelope", ["filt_attack", "filt_decay", "filt_sustain", "filt_release"]),
     ("Noise & drive", ["noise_level", "drive"]),
     ("Delay", ["delay_time", "delay_feedback", "delay_mix"]),
     ("Reverb", ["reverb_rt60", "reverb_mix"]),
     ("Output", ["gain"]),
 ]
-UNITS = {"cutoff": "Hz", "filt_env_amount": "oct", "reverb_rt60": "s"}
+UNITS = {"cutoff": "Hz", "filt_env_amount": "oct", "reverb_rt60": "s", "unison_cents": "cents"}
 for _n in PARAM_SPECS:
-    if _n.endswith(("_attack", "_decay", "_release")) or _n == "delay_time":
+    if _n.endswith(("_attack", "_decay", "_release")) or _n in ("delay_time", "glide_time"):
         UNITS[_n] = "s"
 
 
@@ -47,7 +49,7 @@ class DemoRequest(BaseModel):
     notes: int = Field(10, ge=1, le=40)
     roll_steps: int = Field(400, ge=1, le=3000)
     note_steps: int = Field(300, ge=1, le=3000)
-    sparsity: float = 1.0
+    sparsity: float = 0.5
 
 
 class RenderRequest(BaseModel):
@@ -91,6 +93,7 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
             "groups": [{"title": t, "params": p} for t, p in PARAM_GROUPS],
             "waveforms": list(WAVEFORMS),
             "max_duration_s": MAX_DURATION_S,
+            "tools": available_tools(),
         }
 
     @app.get("/api/jobs")
@@ -109,11 +112,17 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
         pitch_min: int = Form(36),
         pitch_max: int = Form(84),
         seed: int = Form(0),
+        lead: bool = Form(False),
+        separate: bool = Form(False),
+        basic_pitch: bool = Form(False),
     ):
         if not 0.25 <= duration <= MAX_DURATION_S:
             raise HTTPException(422, f"duration must be between 0.25 and {MAX_DURATION_S} s")
         if not 1 <= voices <= 4 or not 0 <= pitch_min < pitch_max <= 127:
             raise HTTPException(422, "1-4 voices and 0 <= pitch_min < pitch_max <= 127")
+        tools = available_tools()
+        if (separate and not tools["demucs"]) or (basic_pitch and not tools["basic_pitch"]):
+            raise HTTPException(422, "that tool is not installed; see requirements-tools.txt")
         fd, tmp = tempfile.mkstemp(dir=jobs.root)
         size = 0
         with os.fdopen(fd, "wb") as out:
@@ -126,7 +135,7 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
                 out.write(chunk)
         cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
                    note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
-                   seed=seed)
+                   seed=seed, lead=lead, separate=separate, basic_pitch=basic_pitch)
         job = jobs.submit_upload(os.path.basename(file.filename or "upload"), tmp, cfg)
         return job.public()
 

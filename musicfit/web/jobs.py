@@ -15,8 +15,9 @@ import soundfile as sf
 import torch
 
 from ..audio_io import load_audio, save_audio
-from ..fit import FitConfig, fit, note_metrics, stage2_steps
+from ..fit import FitConfig, fit, lead_settings, note_metrics, stage2_steps
 from ..synthetic import synthetic_target
+from ..tools import fit_with_tools
 
 
 class Cancelled(Exception):
@@ -127,7 +128,8 @@ class JobManager:
             sr=int(c.get("sr", 16000)), n_voices=int(c.get("voices", 1)),
             pitch_min=int(c.get("pitch_min", 36)), pitch_max=int(c.get("pitch_max", 84)),
             roll_steps=int(c.get("roll_steps", 400)), note_steps=int(c.get("note_steps", 300)),
-            sparsity=float(c.get("sparsity", 1.0)), seed=int(c.get("seed", 0)),
+            sparsity=float(c.get("sparsity", 0.5)), seed=int(c.get("seed", 0)),
+            **(lead_settings() if c.get("lead") else {}),
         )
 
     def _run(self, job: Job) -> None:
@@ -146,6 +148,9 @@ class JobManager:
         def progress(info: dict) -> None:
             if job.id in self._cancel:
                 raise Cancelled()
+            if info["stage"] == "drums":  # a separate short fit after the notes, not on the loss chart
+                job.stage, job.step, job.total = info["stage"], info["step"], info["total"]
+                return
             offset = 0 if info["stage"] == "roll" else cfg.roll_steps + 1
             g = offset + info["step"]
             job.stage, job.step, job.total = info["stage"], info["step"], info["total"]
@@ -170,7 +175,11 @@ class JobManager:
                 target = target / (target.abs().max() + 1e-8) * 0.5
             save_audio(os.path.join(d, "target.wav"), target, cfg.sr)
 
-            res = fit(target, cfg, verbose=False, progress=progress)
+            if c.get("separate") or c.get("basic_pitch"):
+                res = fit_with_tools(target, cfg, bool(c.get("separate")), bool(c.get("basic_pitch")),
+                                     verbose=False, progress=progress)
+            else:
+                res = fit(target, cfg, verbose=False, progress=progress)
 
             save_audio(os.path.join(d, "fit.wav"), res.audio, cfg.sr)
             if res.noise is not None:  # drums + noise floor, added to every re-render of the notes

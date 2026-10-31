@@ -45,6 +45,9 @@
           </div>
           <p class="hint">A Standard fit of a 3-4 s clip with one voice takes about 20 s on an NVIDIA GPU and several minutes on a CPU; time grows with clip length and voices. Longer runs than Standard fit worse, not better.</p>
           <p class="hint">Sparsity is the penalty that keeps the piano roll from explaining everything with many quiet notes. Raise it if you get spurious notes, lower it if notes go missing.</p>
+          <label class="check"><input type="checkbox" name="lead"> Mono lead or acid line (also fits slides between notes; takes about two-thirds longer)</label>
+          <label class="check" id="separate-wrap" hidden><input type="checkbox" name="separate"> Split off the drums first (Demucs)</label>
+          <label class="check" id="basic-pitch-wrap" hidden><input type="checkbox" name="basic_pitch"> Start from an automatic transcription (basic-pitch; finds far more notes in busy music)</label>
         </details>
         <button type="submit" class="primary" id="upload-btn">Upload and fit</button>
       </form>

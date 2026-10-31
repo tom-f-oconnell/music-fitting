@@ -1,0 +1,12 @@
+# Optional pretrained helpers (musicfit/tools.py): Demucs source separation and basic-pitch
+# transcription. After this file, also run: pip install --no-deps basic-pitch
+# (basic-pitch runs on ONNX below; its own metadata asks for a TensorFlow too old to exist for
+# current Pythons.)
+demucs
+onnxruntime
+librosa
+scipy
+pretty_midi
+mir_eval
+resampy
+scikit-learn

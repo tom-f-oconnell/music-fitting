@@ -693,6 +693,8 @@ function wire() {
 
 async function main() {
   S.specs = await (await api("/api/specs")).json();
+  $("#separate-wrap").hidden = !S.specs.tools.demucs;
+  $("#basic-pitch-wrap").hidden = !S.specs.tools.basic_pitch;
   wire();
   await refreshJobs();
   setInterval(refreshJobs, 4000);

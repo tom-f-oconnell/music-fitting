@@ -27,7 +27,7 @@ def patch_from_dict(d: dict) -> SynthParams:
 
 def notes_from_dicts(items: list[dict]) -> list[Note]:
     return [Note(float(n["pitch"]), float(n["onset"]), float(n["duration"]), float(n["velocity"]),
-                 int(n.get("voice", 0))) for n in items]
+                 int(n.get("voice", 0)), float(n.get("glide", 0.0))) for n in items]
 
 
 @torch.no_grad()
@@ -41,9 +41,10 @@ def render(patches: list[dict], notes: list[Note], n_samples: int, sr: int = 160
         vn = [n for n in notes if n.voice == v]
         if not vn:
             continue
+        glide = torch.tensor([n.glide for n in vn]) if any(n.glide for n in vn) else None
         out = out + synth.render_notes(
             torch.tensor([n.pitch for n in vn]), torch.tensor([n.onset for n in vn]),
-            torch.tensor([n.duration for n in vn]), torch.tensor([n.velocity for n in vn]), n_samples)
+            torch.tensor([n.duration for n in vn]), torch.tensor([n.velocity for n in vn]), n_samples, glide)
     return out
 
 
