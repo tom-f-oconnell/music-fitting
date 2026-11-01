@@ -77,6 +77,10 @@ class LiveSynth {
     this.reverb.connect(this.reverbMix);
     this.reverbMix.connect(this.master);
     this.master.connect(ctx.destination);
+    this.analyser = ctx.createAnalyser();
+    this.analyser.fftSize = 1024;
+    this.master.connect(this.analyser);
+    this.levelBuffer = new Float32Array(this.analyser.fftSize);
 
     const noise = ctx.createBuffer(1, 2 * ctx.sampleRate, ctx.sampleRate);
     const samples = noise.getChannelData(0);
@@ -121,6 +125,12 @@ class LiveSynth {
       for (const f of n.filters) { set(f.frequency, this.cutoff(p)); set(f.Q, this.q(p)); }
       n.noiseGain.gain.setTargetAtTime(p.noise_level, t, 0.01);
     }
+  }
+
+  // The peak of the output just now, for the level meter.
+  level() {
+    this.analyser.getFloatTimeDomainData(this.levelBuffer);
+    return this.levelBuffer.reduce((peak, x) => Math.max(peak, Math.abs(x)), 0);
   }
 
   cutoff(p) { return clamp(p.cutoff, 20, this.ctx.sampleRate / 2); }
@@ -231,15 +241,27 @@ const BLACK = new Set([1, 3, 6, 8, 10]);
 const VELOCITIES = [1, 20, 40, 60, 80, 100, 120, 127];
 const KEYS_SPAN = 17;
 
+// Boxes that take letters keep the keyboard. A number box or a dropdown has no use for A to ', so it
+// doesn't: focus stays in those easily, after choosing an option or (in some browsers) clicking a button.
+const TEXT_INPUTS = new Set(["text", "search", "url", "email", "password", "tel"]);
+function textEntry() {
+  const el = document.activeElement;
+  if (!el) return null;
+  return el.isContentEditable || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && TEXT_INPUTS.has(el.type)) ? el : null;
+}
+
 // Build the keyboard in the page. `host` supplies getPatch(), getHarmonics(), getSampleRate(), isActive(),
-// noteName(pitch) and defaultSlide(); returns patchChanged(), jobChanged() and allOff().
+// noteName(pitch) and defaultSlide(); returns patchChanged(), jobChanged(), allOff() and state().
 function setupKeyboard(host) {
-  const piano = document.querySelector("#piano");
-  const held = new Map();  // key or pointer -> {note, pitch, el}
-  let ctx = null, synth = null;
-  let base = 60, velocity = 100;
+  const $k = (sel) => document.querySelector(sel);
+  const piano = $k("#piano");
+  const held = new Map();  // key or pointer -> {note, pitch, el, label}
+  let ctx = null, synth = null, ctxRate = null, soundProblem = "", meterRunning = false, toastTimer = null;
+  let base = 60, velocity = 100, message = "Press a key to play.", warning = false;
   let enabled = localStorage.getItem("musicfit:keyboard") !== "off";
   const els = new Map();
+  const labelOf = new Map([["KeyZ", "Z"], ["KeyX", "X"], ["KeyC", "C"], ["KeyV", "V"], ["KeyM", "M"]]);
+  const codeByKey = new Map([...labelOf].map(([code, label]) => [label.toLowerCase(), code]));
 
   const whites = KEY_MAP.filter(([, , o]) => !BLACK.has(o % 12)).length;
   let white = 0;
@@ -248,91 +270,183 @@ function setupKeyboard(host) {
     const black = BLACK.has(offset % 12);
     el.className = "pkey " + (black ? "black" : "white");
     el.dataset.offset = offset;
+    el.dataset.label = label;
     el.style.left = `${(100 * (black ? white : white++)) / whites}%`;
     el.style.width = `${100 / whites}%`;
     el.innerHTML = `<span class="pname"></span><span class="pletter">${label === "'" ? "&#39;" : label}</span>`;
     piano.appendChild(el);
     els.set(code, el);
+    labelOf.set(code, label);
+    codeByKey.set(label.toLowerCase(), code);
   }
+  // some remote desktops and input methods don't report physical keys
+  const codeOf = (e) => (e.code && e.code !== "Unidentified" ? e.code : codeByKey.get((e.key || "").toLowerCase()) || "");
+
+  // ---- what the user sees: keys held, the last thing that happened, and the sound
+
+  function say(text, isWarning = false) {
+    message = text;
+    warning = isWarning;
+    showStatus();
+  }
+  function soundText() {
+    if (soundProblem) return `No sound: ${soundProblem}`;
+    if (!ctx) return "Sound starts with the first note";
+    if (ctx.state === "running") return "Sound on";
+    return "Sound is waiting for the browser: click the page";
+  }
+  function showStatus(fromKey = false) {
+    const pressed = [...held.values()];
+    const chips = pressed.map((h) => `<kbd>${h.label === "'" ? "&#39;" : h.label}</kbd> ${host.noteName(h.pitch)}`).join(" ");
+    const text = $k("#kbd-message");
+    $k("#kbd-pressed").innerHTML = chips;
+    text.textContent = message;
+    text.classList.toggle("warn", warning);
+    const sound = $k("#kbd-sound");
+    sound.textContent = soundText();
+    sound.classList.toggle("warn", !!soundProblem || (!!ctx && ctx.state !== "running"));
+    if (fromKey) showToast(chips, message);
+  }
+  // the Play box is far down the page: keep key presses visible from anywhere
+  function showToast(chips, text) {
+    const box = $k(".card.play").getBoundingClientRect();
+    const toast = $k("#kbd-toast");
+    clearTimeout(toastTimer);
+    if (box.top >= 0 && box.bottom <= window.innerHeight) { toast.hidden = true; return; }
+    toast.innerHTML = chips || "";
+    toast.appendChild(document.createTextNode((chips ? "  " : "") + text));
+    toast.classList.toggle("warn", warning);
+    toast.hidden = false;
+    toastTimer = setTimeout(() => { if (!held.size) toast.hidden = true; }, 2000);
+  }
+  function runMeter() {
+    if (meterRunning || !synth) return;
+    meterRunning = true;
+    const bar = $k("#kbd-meter");
+    const frame = () => {
+      const level = synth ? synth.level() : 0;
+      bar.style.width = `${Math.min(100, 100 * Math.sqrt(level))}%`;
+      if (synth && (synth.notes.size || level > 0.001)) requestAnimationFrame(frame);
+      else { meterRunning = false; bar.style.width = "0"; }
+    };
+    requestAnimationFrame(frame);
+  }
+
+  // ---- notes
 
   function context() {
     const sr = host.getSampleRate();
-    if (!ctx || ctx.sampleRate !== sr) {
+    if (!ctx || ctxRate !== sr) {
       if (ctx) ctx.close();
-      ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sr, latencyHint: "interactive" });
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      try {
+        ctx = new AudioContextClass({ sampleRate: sr, latencyHint: "interactive" });
+      } catch (e) {  // this browser won't run at the fit's rate: the notes still sound right at its own
+        ctx = new AudioContextClass();
+      }
+      ctxRate = sr;
+      ctx.onstatechange = () => showStatus();
       synth = new LiveSynth(ctx);
     }
-    if (ctx.state !== "running") ctx.resume();
+    if (ctx.state !== "running") ctx.resume().catch((e) => { soundProblem = e.message; showStatus(); });
     return ctx;
   }
 
   function press(id, offset, el) {
     if (held.has(id)) return;
     const pitch = base + offset;
-    const c = context();
-    synth.setPatch(host.getPatch(), host.getHarmonics());
+    const h = { note: null, pitch, el, label: el.dataset.label };
     const previous = [...held.values()].pop();
-    const slide = document.querySelector("#kbd-slide").checked && previous ? previous.pitch : null;
-    held.set(id, { note: synth.noteOn(pitch, velocity / 127, c.currentTime, slide), pitch, el });
+    held.set(id, h);
     el.classList.add("down");
+    message = `${host.noteName(pitch)}, velocity ${velocity}`;
+    warning = false;
+    try {  // the key has already lit up: a problem with the sound shouldn't hide that it was pressed
+      const c = context();
+      synth.setPatch(host.getPatch(), host.getHarmonics());
+      const slide = $k("#kbd-slide").checked && previous ? previous.pitch : null;
+      h.note = synth.noteOn(pitch, velocity / 127, c.currentTime, slide);
+      soundProblem = "";
+      runMeter();
+    } catch (e) {
+      soundProblem = e.message;
+      console.error(e);
+    }
+    showStatus(true);
   }
   function release(id) {
     const h = held.get(id);
     if (!h) return;
     held.delete(id);
-    synth.noteOff(h.note, ctx.currentTime);
+    if (h.note) synth.noteOff(h.note, ctx.currentTime);
     if (![...held.values()].some((x) => x.el === h.el)) h.el.classList.remove("down");
+    showStatus(true);
   }
   function allOff() { [...held.keys()].forEach(release); }
 
   function show() {
-    document.querySelector("#kbd-range").textContent = `${host.noteName(base)}–${host.noteName(base + KEYS_SPAN)}`;
-    document.querySelector("#kbd-velocity").textContent = velocity;
-    document.querySelector("#kbd-on").checked = enabled;
+    $k("#kbd-range").textContent = `${host.noteName(base)}–${host.noteName(base + KEYS_SPAN)}`;
+    $k("#kbd-velocity").textContent = velocity;
+    $k("#kbd-on").checked = enabled;
     piano.classList.toggle("off", !enabled);
     for (const el of els.values()) {
       const pitch = base + Number(el.dataset.offset);
       el.querySelector(".pname").textContent = pitch % 12 === 0 ? host.noteName(pitch) : "";
     }
   }
-  function shiftOctave(by) { base = clamp(base + 12 * by, 0, 108); show(); }
+  function shiftOctave(by) { base = clamp(base + 12 * by, 0, 108); show(); say(`Keys ${host.noteName(base)}–${host.noteName(base + KEYS_SPAN)}`); showStatus(true); }
   function stepVelocity(by) {
     const i = VELOCITIES.findIndex((v) => v >= velocity);
     velocity = VELOCITIES[clamp(i + by, 0, VELOCITIES.length - 1)];
     show();
+    say(`Velocity ${velocity}`);
+    showStatus(true);
   }
   function setEnabled(on) {
     enabled = on;
     localStorage.setItem("musicfit:keyboard", on ? "on" : "off");
     if (!on) [...held.keys()].filter((id) => !id.startsWith("pointer")).forEach(release);
     show();
+    say(on ? "Computer keyboard on." : "Computer keyboard off. Press M or tick the box to turn it back on.", !on);
+    showStatus(true);
   }
 
-  const typing = () => {
-    const el = document.activeElement;
-    if (!el) return false;
-    if (el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "SELECT") return true;
-    return el.tagName === "INPUT" && !["range", "checkbox", "radio", "button", "file"].includes(el.type);
-  };
-  const ignoreKey = (e) => e.ctrlKey || e.metaKey || e.altKey || typing() || !host.isActive() || document.querySelector("dialog[open]");
-  document.addEventListener("keydown", (e) => {
-    if (ignoreKey(e)) return;
-    if (e.code === "KeyM") { if (!e.repeat) setEnabled(!enabled); return; }
-    if (!enabled) return;
-    const control = { KeyZ: () => shiftOctave(-1), KeyX: () => shiftOctave(1), KeyC: () => stepVelocity(-1), KeyV: () => stepVelocity(1) }[e.code];
-    const el = els.get(e.code);
-    if (!control && !el) return;
-    e.preventDefault();  // Firefox's quick find is on ' and /
+  // ---- keys: listened for first of all, so nothing in the page can swallow them
+
+  const controls = { KeyZ: () => shiftOctave(-1), KeyX: () => shiftOctave(1), KeyC: () => stepVelocity(-1), KeyV: () => stepVelocity(1) };
+  const inTextBox = "Typing goes to the text box. Click the piano or press Esc to play.";
+  window.addEventListener("keydown", (e) => {
+    if (!host.isActive() || $k("dialog[open]")) return;
+    const code = codeOf(e), box = textEntry();
+    if (e.key === "Escape" && box) { box.blur(); return; }
+    const ours = els.has(code) || code in controls || code === "KeyM";
+    if (!ours) {
+      if (!box && !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.length === 1 && e.key !== " ") say(`${e.key.toUpperCase()} isn't a key on this keyboard.`);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;  // browser shortcuts
+    if (box) { say(`${labelOf.get(code)} didn't play. ${inTextBox}`, true); showStatus(true); return; }
+    e.preventDefault();  // Firefox's quick find is on ' and /, and these aren't for a dropdown or number box
     if (e.repeat) return;
-    if (control) control();
-    else press(e.code, Number(el.dataset.offset), el);
+    if (code === "KeyM") { setEnabled(!enabled); return; }
+    if (!enabled) { say(`${labelOf.get(code)} didn't play: the computer keyboard is off. Press M or tick the box.`, true); showStatus(true); return; }
+    if (code in controls) controls[code]();
+    else press(code, Number(els.get(code).dataset.offset), els.get(code));
+  }, true);
+  window.addEventListener("keyup", (e) => release(codeOf(e)), true);
+  window.addEventListener("blur", () => {
+    allOff();
+    say("This window doesn't have the keyboard. Click the page to play.", true);
   });
-  document.addEventListener("keyup", (e) => release(e.code));
-  window.addEventListener("blur", allOff);
+  window.addEventListener("focus", () => say(textEntry() ? inTextBox : "Press a key to play.", !!textEntry()));
+  document.addEventListener("focusin", () => { if (textEntry()) say(inTextBox, true); });
+  document.addEventListener("focusout", () => { if (warning && message === inTextBox) say("Press a key to play."); });
   document.addEventListener("visibilitychange", () => { if (document.hidden) allOff(); });
 
-  // mouse and touch; dragging across the keys plays each in turn
+  // ---- mouse and touch; dragging across the keys plays each in turn
+
   const keyAt = (e) => { const el = document.elementFromPoint(e.clientX, e.clientY); return el && el.closest(".pkey"); };
+  $k(".card.play").addEventListener("pointerdown", () => { const box = textEntry(); if (box) box.blur(); });
   piano.addEventListener("pointerdown", (e) => {
     const el = keyAt(e);
     if (!el) return;
@@ -349,17 +463,18 @@ function setupKeyboard(host) {
   });
   for (const type of ["pointerup", "pointercancel"]) window.addEventListener(type, (e) => release(`pointer${e.pointerId}`));
 
-  document.querySelector("#kbd-octave-down").onclick = () => shiftOctave(-1);
-  document.querySelector("#kbd-octave-up").onclick = () => shiftOctave(1);
-  document.querySelector("#kbd-velocity-down").onclick = () => stepVelocity(-1);
-  document.querySelector("#kbd-velocity-up").onclick = () => stepVelocity(1);
-  document.querySelector("#kbd-on").onchange = (e) => setEnabled(e.target.checked);
+  $k("#kbd-octave-down").onclick = () => shiftOctave(-1);
+  $k("#kbd-octave-up").onclick = () => shiftOctave(1);
+  $k("#kbd-velocity-down").onclick = () => stepVelocity(-1);
+  $k("#kbd-velocity-up").onclick = () => stepVelocity(1);
+  $k("#kbd-on").onchange = (e) => setEnabled(e.target.checked);
   show();
+  showStatus();
 
   return {
     patchChanged() { if (synth && host.isActive()) synth.setPatch(host.getPatch(), host.getHarmonics()); },
-    jobChanged() { allOff(); document.querySelector("#kbd-slide").checked = host.defaultSlide(); show(); },
+    jobChanged() { allOff(); $k("#kbd-slide").checked = host.defaultSlide(); show(); say(textEntry() ? inTextBox : "Press a key to play.", !!textEntry()); },
     allOff,
-    state: () => ({ base, velocity, enabled, held: held.size, sounding: synth ? synth.notes.size : 0, audio: ctx ? ctx.state : null }),
+    state: () => ({ base, velocity, enabled, message, warning, soundProblem, held: held.size, sounding: synth ? synth.notes.size : 0, audio: ctx ? ctx.state : null, level: synth ? synth.level() : 0 }),
   };
 }

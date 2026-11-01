@@ -516,6 +516,13 @@ so the top end (`;` and `'`) and the velocity ladder 1, 20, …, 120, 127 are fr
 Live itself. A is MIDI note 60, which Ableton names C3 and this app, like the piano roll,
 names C4.
 
+Only boxes that take letters keep the keys. Focus stays behind easily: in a dropdown after
+choosing an option, in a number box after typing in it, and, in Safari and in Firefox on a
+Mac, even after clicking a button. So number boxes and dropdowns don't stop the keyboard, as
+a first version's did, silently. Anything that stops a key is reported in the status line under
+the piano, keys light up before any sound is attempted so a sound problem can't look like a
+keyboard problem, and a level meter tells a muted computer from a silent synth.
+
 **Cached data** (`dataset/library.py`, `web/downloads.py`). Every subdirectory of
 `MUSICFIT_DATA` is a dataset, recognised by its layout (a `manifest.jsonl`, BabySlakh's
 `Track*/`, or plain audio files), so data from the command-line builder or copied in by

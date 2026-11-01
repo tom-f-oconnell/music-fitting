@@ -37,7 +37,9 @@ Then open http://localhost:43153.
   notes and more harmonics, and takes about two-thirds longer.
 * **Play:** the box below the patch plays it live, with the mouse or your computer
   keyboard, laid out like Ableton Live's: A to ' are the white keys, W E T Y U O P
-  the black ones, Z/X change the octave, C/V the velocity, and M turns it off.
+  the black ones, Z/X change the octave, C/V the velocity, and M turns it off. The
+  line under the keys shows what's held, why a key didn't play if it didn't, and
+  whether there is sound. Keys don't play while you're typing in a text box.
 * **Get more audio:** the **Data** menu downloads the datasets this was developed
   on, or similar ones: an artist's albums, a YouTube search or playlist, or a
   Zenodo record. Downloads are kept on disk, can be stopped and resumed, and appear

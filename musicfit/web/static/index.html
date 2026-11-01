@@ -158,6 +158,13 @@
             <label class="check" title="Press M to switch this on and off"><input type="checkbox" id="kbd-on"> Computer keyboard (M)</label>
           </div>
           <div id="piano" class="piano"></div>
+          <div class="kbd-status">
+            <span id="kbd-pressed" class="kbd-pressed"></span>
+            <span id="kbd-message"></span>
+            <div class="spacer"></div>
+            <span id="kbd-sound"></span>
+            <div class="meter" title="Output level. If this moves but you hear nothing, check your computer's sound output and volume."><div id="kbd-meter"></div></div>
+          </div>
           <p class="hint">Plays the patch above, as it is now, for the voice selected there. The keys are laid out like Ableton Live's computer MIDI keyboard: A to &#39; are the white keys and W E T Y U O P the black ones, starting from middle C (which Ableton calls C3), with Z/X for the octave and C/V for the velocity. Drums aren't included.</p>
         </section>
 
@@ -176,6 +183,7 @@
   </main>
 </div>
 
+<div id="kbd-toast" class="kbd-toast" hidden></div>
 <dialog id="data-dialog" class="data-dialog">
   <div class="synth-head">
     <h2>Data</h2>

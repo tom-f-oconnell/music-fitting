@@ -109,8 +109,17 @@ button.link:hover { text-decoration: underline; }
 .pkey.white { height: 100%; background: #e9ebef; color: #333; border: 1px solid #000; border-radius: 0 0 4px 4px; }
 .pkey.black { height: 62%; background: #16181c; color: #c5c9d1; border: 1px solid #000; border-radius: 0 0 3px 3px; z-index: 1; transform: translateX(-50%) scaleX(.62); }
 .pkey.black span { transform: scaleX(1.6); }
-.pkey.down.white { background: var(--accent); }
-.pkey.down.black { background: #b9791f; color: #fff; }
+.pkey.down.white { background: var(--accent); box-shadow: inset 0 -7px 0 #0005; color: #000; }
+.pkey.down.black { background: var(--accent); box-shadow: inset 0 -7px 0 #0005; color: #000; }
+.pkey.down .pname { color: #000; }
+.kbd-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 30px; margin-top: 10px; padding: 5px 10px; background: var(--panel-2); border-radius: 6px; font-size: 13px; }
+.kbd-pressed:empty { display: none; }
+.kbd-status .warn, .kbd-toast.warn { color: var(--accent); font-weight: 600; }
+#kbd-sound { color: var(--muted); font-size: 12px; }
+kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; text-align: center; background: var(--accent); color: var(--accent-ink); border-radius: 3px; font: 600 12px system-ui, sans-serif; }
+.meter { width: 90px; height: 8px; background: #0006; border-radius: 4px; overflow: hidden; }
+.meter > div { width: 0; height: 100%; background: var(--ok); }
+.kbd-toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 5; padding: 7px 14px; background: #000e; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; white-space: pre-wrap; pointer-events: none; }
 .pkey .pname { color: #777; font-size: 10px; }
 .pkey .pletter { font-weight: 600; }
 

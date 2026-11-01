@@ -275,6 +275,7 @@ function sliderRow(label, spec, help, get, set, fittedVal, trueVal) {
     if (!isNaN(v)) { set(Math.min(Math.max(v, spec.low), spec.high)); changed(); }
     sync();
   };
+  text.onkeydown = (e) => { if (e.key === "Enter") text.blur(); };  // done typing: the keys can play again
   range.ondblclick = () => { set(fittedVal); sync(); changed(); };
   sync();
   row.sync = sync;
