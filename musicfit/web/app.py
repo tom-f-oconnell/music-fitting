@@ -86,6 +86,18 @@ PARAM_HELP = {
 }
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files that browsers must check for changes before reusing a saved copy.
+
+    Without this, a reload after an update can pair the new index.html with the old app.js.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class DemoRequest(BaseModel):
     seed: int = 1
     length: float = Field(3.0, ge=1.0, le=8.0)
@@ -293,7 +305,7 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
     def value_error(_, exc):
         return JSONResponse({"detail": str(exc)}, status_code=422)
 
-    app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+    app.mount("/", RevalidatedStaticFiles(directory=STATIC, html=True), name="static")
     return app
 
 

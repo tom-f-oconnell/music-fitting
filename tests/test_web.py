@@ -99,6 +99,14 @@ def test_tools_are_offered_only_when_installed(client, monkeypatch):
         assert bad.status_code == 422 and "requirements-tools" in bad.json()["detail"]
 
 
+@pytest.mark.parametrize("path", ["/", "/app.js", "/keyboard.js", "/style.css"])
+def test_browsers_must_check_static_files_for_changes(client, path):
+    first = client.get(path)
+    assert first.status_code == 200 and first.headers["cache-control"] == "no-cache"
+    unchanged = client.get(path, headers={"If-None-Match": first.headers["etag"]})
+    assert unchanged.status_code == 304 and unchanged.headers["cache-control"] == "no-cache"
+
+
 def test_every_slider_has_hover_text(client):
     specs = client.get("/api/specs").json()
     assert all(p["help"] for p in specs["params"].values())

@@ -153,8 +153,8 @@ def _scan_dataset(name: str, base: str) -> tuple[list[Track], int]:
     listed = _manifest_tracks(name, base)
     for d, subdirs, files in os.walk(base):
         subdirs[:] = sorted(s for s in subdirs if not s.endswith(".part") and s != "download")
-        size += sum(os.path.getsize(os.path.join(d, f)) for f in files)
-        if listed:
+        size += sum(_size(os.path.join(d, f)) for f in files)
+        if listed is not None:
             continue
         rel = os.path.relpath(d, base)
         if "metadata.yaml" in files and "mix.wav" in files:
@@ -166,13 +166,21 @@ def _scan_dataset(name: str, base: str) -> tuple[list[Track], int]:
                 if f.lower().endswith(AUDIO_EXTS):
                     path = os.path.normpath(os.path.join(rel, f))
                     tracks.append(Track(f"{name}/{path}", os.path.splitext(f)[0], _duration(os.path.join(d, f))))
-    return listed or tracks, size
+    return (tracks if listed is None else listed), size
 
 
-def _manifest_tracks(name: str, base: str) -> list[Track]:
+def _size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:  # a running download has just replaced its temporary file
+        return 0
+
+
+def _manifest_tracks(name: str, base: str) -> list[Track] | None:
+    """The tracks a manifest says finished, or None without one. Other audio beside it may be unfinished."""
     path = os.path.join(base, "manifest.jsonl")
     if not os.path.exists(path):
-        return []
+        return None
     tracks = []
     with open(path) as f:
         for line in f:

@@ -567,7 +567,15 @@ const formatSize = (bytes) => (bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" :
 
 async function refreshLibrary() {
   clearTimeout(S.libraryTimer);
-  try { S.library = await (await api("/api/library")).json(); } catch (e) { return; }
+  const problem = $("#data-error");
+  try {
+    S.library = await (await api("/api/library")).json();
+    problem.hidden = true;
+  } catch (e) {
+    problem.hidden = false;
+    problem.textContent = `Could not load the data library (${e.message}). If the app was updated recently, restart the server.`;
+    return;
+  }
   showTracks();
   showDataDialog();
   const active = S.library.downloads.some((d) => d.status === "queued" || d.status === "running");

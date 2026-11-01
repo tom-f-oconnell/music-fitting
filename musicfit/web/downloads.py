@@ -12,6 +12,7 @@ import os
 import queue
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
@@ -148,7 +149,10 @@ class DownloadManager:
         while True:
             d = self._queue.get()
             if d.status == "queued":  # else cancelled while waiting
-                self._run(d)
+                try:
+                    self._run(d)
+                except Exception:  # noqa: BLE001  (saving failed, disk full, ...: later downloads can still run)
+                    traceback.print_exc()
 
     def _run(self, d: Download) -> None:
         d.status = "running"
@@ -222,14 +226,13 @@ class DownloadManager:
         if not force and time.time() - self._saved_at < 1.0:
             return
         self._saved_at = time.time()
-        with self._lock:
+        with self._lock:  # requests and the worker both save, through the same temporary file
             newest = sorted(self.records.values(), key=lambda d: -d.created)[:KEEP_RECORDS]
             self.records = {d.id: d for d in newest}
-            text = json.dumps([asdict(d) for d in newest], indent=1)
-        tmp = self.records_path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, self.records_path)
+            tmp = self.records_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump([asdict(d) for d in newest], f, indent=1)
+            os.replace(tmp, self.records_path)
 
     def _load(self) -> None:
         try:

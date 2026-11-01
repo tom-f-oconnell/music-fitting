@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tarfile
+import threading
 import time
 
 import numpy as np
@@ -68,6 +69,21 @@ def test_lists_each_layout_with_titles(tmp_path):
     assert found["babyslakh"]["name"] == "BabySlakh"
     assert [t["title"] for t in found["plain"]["tracks"]] == ["take one"]
     assert found["plain"]["tracks"][0]["duration_s"] == pytest.approx(1.0)
+
+
+def test_listing_survives_files_vanishing_during_a_download(tmp_path, monkeypatch):
+    root = str(tmp_path / "data")
+    _manifest_dataset(root)
+    walk = os.walk
+    monkeypatch.setattr(lib.os, "walk", lambda base: ((d, s, f + ["manifest.jsonl.tmp"]) for d, s, f in walk(base)))
+    assert Library(root).datasets()[1]["id"] == "yt"
+
+
+def test_a_manifest_with_nothing_finished_lists_nothing(tmp_path):
+    root = tmp_path / "data"
+    _tone(str(root / "yt" / "audio" / "unfinished.wav"))
+    (root / "yt" / "manifest.jsonl").write_text(json.dumps({"work_key": "a", "title": "A", "artist": "B", "status": "download_failed"}) + "\n")
+    assert [d["id"] for d in Library(str(root)).datasets()] == ["examples"]
 
 
 def test_examples_ship_and_local_ones_need_the_download(tmp_path):
@@ -252,6 +268,41 @@ def test_a_cancelled_download_keeps_what_it_has_and_resumes(app):
     manager.client_factory = lambda: second
     d = _wait_download(client, client.post("/api/library/downloads", json={"source": "search", "query": "x", "name": "Stops"}).json()["id"])
     assert d["status"] == "done" and second.downloaded == ["id1", "id2"]
+
+
+def test_records_can_be_saved_from_several_threads(app):
+    manager, errors = app.state.downloads, []
+
+    def save():
+        for _ in range(200):
+            try:
+                manager._save(force=True)
+            except OSError as e:
+                errors.append(e)
+
+    threads = [threading.Thread(target=save) for _ in range(3)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors
+
+
+def test_a_failure_saving_records_doesnt_stop_later_downloads(app, monkeypatch):
+    client, manager = TestClient(app), app.state.downloads
+    manager.client_factory = lambda: FakeYouTube(_videos(1))
+    run = manager._run
+    calls = []
+
+    def fails_once(d):
+        calls.append(d.id)
+        if len(calls) == 1:
+            d.status = "failed"
+            raise OSError("disk full")
+        run(d)
+
+    monkeypatch.setattr(manager, "_run", fails_once)
+    client.post("/api/library/downloads", json={"source": "search", "query": "x", "name": "First"})
+    second = client.post("/api/library/downloads", json={"source": "search", "query": "y", "name": "Second"}).json()
+    assert _wait_download(client, second["id"])["status"] == "done"
 
 
 def test_the_same_dataset_cant_download_twice_at_once(app):
