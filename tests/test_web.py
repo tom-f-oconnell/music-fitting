@@ -99,6 +99,13 @@ def test_tools_are_offered_only_when_installed(client, monkeypatch):
         assert bad.status_code == 422 and "requirements-tools" in bad.json()["detail"]
 
 
+def test_every_slider_has_hover_text(client):
+    specs = client.get("/api/specs").json()
+    assert all(p["help"] for p in specs["params"].values())
+    assert {name for g in specs["groups"] for name in g["params"]} == set(specs["params"])
+    assert all(specs["waveform_help"][w] for w in specs["waveforms"])
+
+
 def test_upload_job_with_tools(client, monkeypatch):
     """The form's checkboxes reach fit_with_tools (with the tools themselves replaced)."""
     sr = 16000

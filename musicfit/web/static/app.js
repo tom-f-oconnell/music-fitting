@@ -244,12 +244,12 @@ function buildVoiceTabs() {
   });
 }
 
-function sliderRow(label, spec, get, set, fittedVal, trueVal) {
+function sliderRow(label, spec, help, get, set, fittedVal, trueVal) {
   const row = document.createElement("div");
   row.className = "slider";
   row.innerHTML = `<span class="pname"></span><div class="track"><input type="range" min="0" max="1000" step="1"></div><input type="text">`;
   row.querySelector(".pname").textContent = label;
-  row.querySelector(".pname").title = label;
+  row.title = `${help ? `${label}: ${help}` : label}\nDouble-click the slider to reset it to the fitted value.`;
   const range = row.querySelector("input[type=range]");
   const text = row.querySelector("input[type=text]");
   const track = row.querySelector(".track");
@@ -271,7 +271,6 @@ function sliderRow(label, spec, get, set, fittedVal, trueVal) {
     sync();
   };
   range.ondblclick = () => { set(fittedVal); sync(); changed(); };
-  range.title = "double-click to reset to the fitted value";
   sync();
   row.sync = sync;
   return row;
@@ -290,7 +289,7 @@ function buildSliders() {
   osc.innerHTML = "<h3>Oscillator mix</h3>";
   const wspec = { low: 0, high: 1, log: false, unit: "" };
   for (const w of S.specs.waveforms) {
-    osc.appendChild(sliderRow(w, wspec, () => p.waveform[w] ?? 0, (x) => { p.waveform[w] = x; }, f.waveform[w], ref ? ref.waveform[w] : null));
+    osc.appendChild(sliderRow(w, wspec, S.specs.waveform_help?.[w], () => p.waveform[w] ?? 0, (x) => { p.waveform[w] = x; }, f.waveform[w], ref ? ref.waveform[w] : null));
   }
   const note = document.createElement("p");
   note.className = "hint";
@@ -306,7 +305,7 @@ function buildSliders() {
     for (const name of g.params) {
       const spec = S.specs.params[name];
       const label = name.replace(/^(amp|filt)_/, "").replace(/_/g, " ");
-      box.appendChild(sliderRow(label, spec, () => p[name], (x) => { p[name] = x; }, f[name], ref ? ref[name] : null));
+      box.appendChild(sliderRow(label, spec, spec.help, () => p[name], (x) => { p[name] = x; }, f[name], ref ? ref[name] : null));
     }
     grid.appendChild(box);
   }

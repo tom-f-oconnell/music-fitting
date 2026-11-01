@@ -28,7 +28,8 @@ Then open http://localhost:43153.
   roll of the fitted notes, and playback of original / fit / your tweaked
   version, switching at the same position (space plays and stops).
 * **Tweak:** every patch parameter has a slider, which marks the fitted
-  value; double-click resets it. Changes re-render within a second. Click a
+  value; hover over it to see what it does, and double-click to reset it.
+  Changes re-render within a second. Click a
   note to mute it. Drums and other unpitched sound are fitted separately and
   stay in every re-render unless you tick *Mute drums & noise*.
 * **Mono lead or acid line:** under Advanced, this also fits slides between

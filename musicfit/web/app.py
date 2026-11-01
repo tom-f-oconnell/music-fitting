@@ -41,6 +41,46 @@ UNITS = {"cutoff": "Hz", "filt_env_amount": "oct", "reverb_rt60": "s", "unison_c
 for _n in PARAM_SPECS:
     if _n.endswith(("_attack", "_decay", "_release")) or _n in ("delay_time", "glide_time"):
         UNITS[_n] = "s"
+# Hover text for the sliders.
+WAVEFORM_HELP = {
+    "sine": "A pure tone with no overtones: soft and round.",
+    "saw": "Has every harmonic: bright and buzzy, the classic lead and bass sound.",
+    "square": "Has only odd harmonics: hollow and reedy.",
+    "triangle": "Odd harmonics that fade quickly: soft, between a sine and a square.",
+}
+PARAM_HELP = {
+    "amp_attack": "How long a note takes to rise from silence to its peak volume. Short is percussive; long fades in.",
+    "amp_decay": "How quickly the volume falls from its peak towards the sustain level.",
+    "amp_sustain": "The volume a held note settles at, as a share of its peak. 0 fades out completely, like a pluck; "
+                   "1 stays at full volume, like an organ.",
+    "amp_release": "How quickly a note fades out after it ends. Long values let notes ring on.",
+    "cutoff": "Where the low-pass filter starts cutting harmonics. Lower sounds darker, higher sounds brighter. "
+              "The filter envelope opens the filter upwards from here.",
+    "resonance": "Boosts the harmonics around the cutoff. Low values roll off smoothly; high values add a sharp, "
+                 "whistling peak, as in acid basslines.",
+    "filt_env_amount": "How far the filter envelope opens the filter on each note, in octaves above the cutoff, "
+                       "and less on quieter notes. 0 keeps the filter still; high values sweep it.",
+    "glide_time": "How quickly a note settles on its pitch when it slides in from the previous note. "
+                  "Only affects notes with a slide, which the Mono lead option fits.",
+    "unison_cents": "Plays three copies of each note this far apart in pitch, for a thick, chorused sound "
+                    "(100 cents is a semitone). Below 0.5 there is just one copy.",
+    "filt_attack": "How long the filter envelope takes to reach its peak, opening the filter. "
+                    "Short gives a sharp start; long gives a slow sweep upwards.",
+    "filt_decay": "How quickly the filter envelope falls from its peak towards its sustain level, closing the filter. "
+                  "Short gives a snappy pluck; long gives a slow sweep downwards.",
+    "filt_sustain": "How far the filter stays open while a note is held, as a share of the envelope's peak.",
+    "filt_release": "How quickly the filter envelope falls after a note ends, closing the filter.",
+    "noise_level": "Unfiltered white noise added to each note and following its volume, for a breathy or rough edge.",
+    "drive": "Saturation, like an overdriven amp. Low values are almost clean; high values squash loud parts "
+             "and add grit.",
+    "delay_time": "The time between echoes.",
+    "delay_feedback": "How much of each echo carries into the next. 0 gives a single echo; "
+                      "higher values give more repeats that fade more slowly.",
+    "delay_mix": "How loud the echoes are, added on top of the original sound. 0 turns the delay off.",
+    "reverb_rt60": "How long the reverb tail lasts: the time it takes to fade by 60 dB. Longer sounds like a bigger room.",
+    "reverb_mix": "How loud the reverb is, added on top of the original sound. 0 turns the reverb off.",
+    "gain": "This voice's overall volume, applied after everything else.",
+}
 
 
 class DemoRequest(BaseModel):
@@ -88,10 +128,12 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
     @app.get("/api/specs")
     def specs():
         return {
-            "params": {n: {"low": s.low, "high": s.high, "default": s.default, "log": s.log, "unit": UNITS.get(n, "")}
+            "params": {n: {"low": s.low, "high": s.high, "default": s.default, "log": s.log, "unit": UNITS.get(n, ""),
+                           "help": PARAM_HELP[n]}
                        for n, s in PARAM_SPECS.items()},
             "groups": [{"title": t, "params": p} for t, p in PARAM_GROUPS],
             "waveforms": list(WAVEFORMS),
+            "waveform_help": WAVEFORM_HELP,
             "max_duration_s": MAX_DURATION_S,
             "tools": available_tools(),
         }
