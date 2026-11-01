@@ -14,10 +14,10 @@ In a terminal, in this folder:
 ```
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-venv/bin/uvicorn musicfit.web.app:app --port 8000
+venv/bin/uvicorn musicfit.web.app:app --port 43153
 ```
 
-Then open http://localhost:8000.
+Then open http://localhost:43153.
 
 * **Fit a clip:** choose an audio file (anything ffmpeg can read), where the
   clip starts and how long it is (up to 15 s), how many voices (synth

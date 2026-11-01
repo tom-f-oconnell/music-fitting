@@ -1,6 +1,6 @@
 """FastAPI app: upload a clip, fit synth + notes in the background, tweak and re-render.
 
-    uvicorn musicfit.web.app:app --port 8000          # then open http://localhost:8000
+    uvicorn musicfit.web.app:app --port 43153          # then open http://localhost:43153
     MUSICFIT_JOBS=/path/to/jobs uvicorn ...            # where jobs and results are stored
 """
 
