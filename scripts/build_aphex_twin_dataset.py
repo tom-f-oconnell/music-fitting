@@ -28,12 +28,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from musicfit.dataset.aphex_twin_catalog import ALBUMS, EPS, curated_works  # noqa: E402
-from musicfit.dataset.catalog import dedupe_works, musicbrainz_tracks, normalize_title, save_catalog  # noqa: E402
+from musicfit.dataset.aphex_twin_catalog import aphex_twin_works  # noqa: E402
+from musicfit.dataset.catalog import save_catalog  # noqa: E402
 from musicfit.dataset.youtube import YouTubeClient, build_dataset  # noqa: E402
-
-MAJOR_ALBUMS = list(ALBUMS)
-MAJOR_EPS = list(EPS)
 
 
 def main():
@@ -55,33 +52,7 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    works = None
-    if args.source in ("auto", "musicbrainz"):
-        try:
-            albums = None if args.all_releases else MAJOR_ALBUMS + ([] if args.no_eps else MAJOR_EPS)
-            works = musicbrainz_tracks("Aphex Twin", albums=albums, include_eps=not args.no_eps)
-            # attach search aliases (SAW II "#n" names etc.) from the curated list, matching
-            # on curated aliases too (MusicBrainz "Mold" is the curated "Mould"); titles take
-            # precedence, so the RDJ Album track "4" doesn't pick up SAW II's "#4"
-            cur = curated_works(include_eps=True)
-            curated = {c.key: c for c in cur}
-            for c in cur:
-                for name in c.aliases:
-                    curated.setdefault(normalize_title(name), c)
-            for w in works:
-                c = curated.get(w.key)
-                if c is not None:
-                    extra = [a for a in [c.title] + c.aliases if normalize_title(a) != w.key]
-                    w.aliases = list(dict.fromkeys(w.aliases + extra))
-            print(f"MusicBrainz catalogue: {len(works)} distinct works")
-        except Exception as e:  # noqa: BLE001
-            if args.source == "musicbrainz":
-                raise
-            print(f"MusicBrainz unavailable ({type(e).__name__}: {e}); using curated catalogue")
-    if works is None:
-        works = curated_works(include_eps=not args.no_eps)
-        print(f"Curated catalogue: {len(works)} distinct works")
-    works = dedupe_works(works)
+    works = aphex_twin_works(args.source, args.all_releases, include_eps=not args.no_eps)
     if args.limit:
         works = works[: args.limit]
     save_catalog(works, os.path.join(args.out, "catalog.json"))

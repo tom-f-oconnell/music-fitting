@@ -26,6 +26,9 @@ const S = {
   renderAbort: null,
   play: null,      // {src, which, start, offset}
   pollTimer: null,
+  library: null,   // datasets, presets and downloads from /api/library
+  libraryTimer: null,
+  keyboard: null,
 };
 
 let actx = null;
@@ -105,6 +108,7 @@ async function refreshJobs() {
 
 async function selectJob(id) {
   if (S.jobId !== id) stop();
+  S.keyboard.allOff();
   S.jobId = id;
   location.hash = "job=" + id;
   S.job = null;
@@ -193,6 +197,7 @@ async function showResult(job) {
   $("#noise-mute").checked = S.muteNoise;
   S.voice = 0;
   $("#result-view").hidden = false;
+  S.keyboard.jobChanged();
   $("#ref-legend").hidden = !r.reference;
   $("#true-legend").hidden = !r.reference;
   buildVoiceTabs();
@@ -239,7 +244,7 @@ function buildVoiceTabs() {
     b.textContent = "Voice " + (v + 1);
     b.style.color = v === S.voice ? VOICE_COLORS[v % 4] : "";
     b.className = v === S.voice ? "active" : "";
-    b.onclick = () => { S.voice = v; buildVoiceTabs(); buildSliders(); };
+    b.onclick = () => { S.keyboard.allOff(); S.voice = v; buildVoiceTabs(); buildSliders(); S.keyboard.patchChanged(); };
     tabs.appendChild(b);
   });
 }
@@ -314,6 +319,7 @@ function buildSliders() {
 function changed() {
   persist();
   scheduleRender(120);
+  S.keyboard.patchChanged();
 }
 
 // ---------------------------------------------------------------- rendering
@@ -555,9 +561,187 @@ function drawAll() {
   drawRoll();
 }
 
+// ---------------------------------------------------------------- library
+
+const formatSize = (bytes) => (bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" : Math.max(bytes / 1e6, 0.1).toFixed(1) + " MB");
+
+async function refreshLibrary() {
+  clearTimeout(S.libraryTimer);
+  try { S.library = await (await api("/api/library")).json(); } catch (e) { return; }
+  showTracks();
+  showDataDialog();
+  const active = S.library.downloads.some((d) => d.status === "queued" || d.status === "running");
+  if (active || $("#data-dialog").open) S.libraryTimer = setTimeout(refreshLibrary, active ? 1500 : 5000);
+}
+
+function showTracks() {
+  const key = JSON.stringify(S.library.datasets.map((d) => [d.name, d.tracks.map((t) => t.id)]));
+  if (key === S.tracksShown) return;  // rebuilding would close the list if it's open
+  S.tracksShown = key;
+  const select = $("#track"), current = select.value;
+  while (select.children.length > 1) select.lastChild.remove();
+  for (const d of S.library.datasets) {
+    if (!d.tracks.length) continue;
+    const group = document.createElement("optgroup");
+    group.label = d.name;
+    for (const t of d.tracks) {
+      const o = document.createElement("option");
+      o.value = t.id;
+      o.textContent = t.title;
+      group.appendChild(o);
+    }
+    select.appendChild(group);
+  }
+  if ([...select.options].some((o) => o.value === current)) select.value = current;
+  showChosenTrack(false);
+}
+
+function findTrack(id) {
+  // the same file can be an example and part of its dataset: the first has the suggested settings
+  for (const d of S.library ? S.library.datasets : []) {
+    const t = d.tracks.find((x) => x.id === id);
+    if (t) return t;
+  }
+  return null;
+}
+
+function showChosenTrack(fill) {
+  const form = $("#upload-form"), t = findTrack($("#track").value);
+  $("#drop").hidden = !!t;
+  $("#track-info").hidden = !t;
+  $("#upload-btn").textContent = t ? "Fit" : "Upload and fit";
+  const src = t ? `/api/library/audio?track=${encodeURIComponent(t.id)}` : "";
+  const preview = $("#track-preview");
+  if (preview.getAttribute("src") !== src) { if (src) preview.src = src; else preview.removeAttribute("src"); }
+  if (!t) return;
+  $("#track-note").textContent = t.note + (t.duration_s ? ` ${Math.floor(t.duration_s / 60)}:${String(Math.round(t.duration_s % 60)).padStart(2, "0")} long.` : "");
+  if (fill) {
+    form.elements.offset.value = t.offset;
+    form.elements.duration.value = t.length;
+    form.elements.voices.value = t.voices;
+  }
+}
+
+function dataRow(ul, title, detail) {
+  const li = document.createElement("li");
+  li.innerHTML = '<div class="data-text"><b></b><div class="hint"></div></div>';
+  li.querySelector("b").textContent = title;
+  li.querySelector(".hint").textContent = detail;
+  ul.appendChild(li);
+  return li;
+}
+function actionButton(li, label, action) {
+  const b = document.createElement("button");
+  b.className = "small";
+  b.textContent = label;
+  b.onclick = async () => {
+    b.disabled = true;
+    try { await action(); } catch (e) { alert(e.message); }
+    refreshLibrary();
+  };
+  li.appendChild(b);
+}
+const postJson = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+function showDataDialog() {
+  const L = S.library;
+  const busy = new Set(L.downloads.filter((d) => d.status === "queued" || d.status === "running").map((d) => d.dataset));
+  $("#data-root").textContent = L.root;
+
+  const select = $("#dl-source");
+  if (!select.options.length) {
+    for (const s of L.sources) {
+      if (s.id === "zenodo" || L.can_use_youtube) select.add(new Option(s.label, s.id));
+    }
+    showSourceHelp();
+  }
+
+  const presets = $("#presets");
+  presets.innerHTML = "";
+  for (const p of L.presets) {
+    const cached = L.datasets.find((d) => d.id === p.id);
+    const li = dataRow(presets, p.name, `${p.description}${cached ? ` You have ${cached.tracks.length} ${cached.tracks.length === 1 ? "track" : "tracks"} (${formatSize(cached.size_bytes)}).` : ""}`);
+    if (!busy.has(p.id) && !p.complete) actionButton(li, cached ? "Get the rest" : "Download", () => postJson("/api/library/downloads", { preset: p.id }));
+  }
+
+  const downloads = $("#downloads");
+  $("#downloads-wrap").hidden = !L.downloads.length;
+  downloads.innerHTML = "";
+  for (const d of L.downloads.slice(0, 8)) {
+    const running = d.status === "running" || d.status === "queued";
+    const count = d.unit === "bytes" ? `${formatSize(d.done)} of ${formatSize(d.total)}` : `${d.done} of ${d.total}`;
+    const li = dataRow(downloads, d.name, `${d.status}${d.total ? ", " + count : ""}${d.message ? ": " + d.message : ""}`);
+    if (d.error) {
+      const err = document.createElement("div");
+      err.className = "error";
+      err.textContent = d.error;
+      li.querySelector(".data-text").appendChild(err);
+    }
+    if (running && d.total) {
+      const bar = document.createElement("div");
+      bar.className = "progress";
+      bar.innerHTML = `<div style="width:${(100 * d.done) / d.total}%"></div>`;
+      li.querySelector(".data-text").appendChild(bar);
+    }
+    if (running) actionButton(li, "Stop", () => api(`/api/library/downloads/${d.id}/cancel`, { method: "POST" }));
+  }
+
+  const datasets = $("#datasets");
+  datasets.innerHTML = "";
+  const cached = L.datasets.filter((d) => d.id !== "examples");
+  if (!cached.length) datasets.innerHTML = '<li class="hint">Nothing yet.</li>';
+  for (const d of cached) {
+    const label = L.sources.find((s) => s.id === d.source);
+    const li = dataRow(datasets, d.name, `${d.tracks.length} ${d.tracks.length === 1 ? "track" : "tracks"}, ${formatSize(d.size_bytes)}${label ? `. From ${label.label.toLowerCase()}: ${d.query}` : ""}`);
+    actionButton(li, "Fit one", async () => {
+      $("#track").value = d.tracks[0].id;
+      showChosenTrack(true);
+      $("#data-dialog").close();
+      $("#track").focus();
+    });
+    if (label && d.source !== "zenodo" && !busy.has(d.id)) {
+      actionButton(li, "Get more", () => postJson("/api/library/downloads", { source: d.source, query: d.query, name: d.name, limit: d.limit || 25 }));
+    }
+  }
+}
+
+function showSourceHelp() {
+  const s = S.library.sources.find((x) => x.id === $("#dl-source").value);
+  if (!s) return;
+  $("#dl-query").placeholder = s.placeholder;
+  $("#dl-limit-wrap").hidden = s.id === "zenodo";
+}
+
+function openDataDialog() {
+  $("#data-dialog").showModal();
+  refreshLibrary();
+}
+
 // ---------------------------------------------------------------- wiring
 
 function wire() {
+  $("#data-btn").onclick = openDataDialog;
+  $("#more-data").onclick = openDataDialog;
+  $("#data-close").onclick = () => $("#data-dialog").close();
+  $("#track").onchange = () => showChosenTrack(true);
+  $("#dl-source").onchange = showSourceHelp;
+  $("#download-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = { source: fd.get("source"), query: fd.get("query"), name: fd.get("name") };
+    if (fd.get("limit")) body.limit = parseInt(fd.get("limit"), 10);
+    $("#dl-error").hidden = true;
+    try {
+      await postJson("/api/library/downloads", body);
+      e.target.elements.query.value = "";
+      e.target.elements.name.value = "";
+    } catch (err) {
+      $("#dl-error").hidden = false;
+      $("#dl-error").textContent = err.message;
+    }
+    refreshLibrary();
+  };
+
   const drop = $("#drop"), file = $("#file");
   const showFile = () => { $("#drop-text").textContent = file.files[0] ? file.files[0].name : "Drop an audio file here or click to choose"; };
   file.onchange = showFile;
@@ -567,19 +751,22 @@ function wire() {
 
   $("#upload-form").onsubmit = async (e) => {
     e.preventDefault();
-    if (!file.files[0]) { alert("Choose an audio file first."); return; }
+    const chosen = !!$("#track").value;
+    if (!chosen && !file.files[0]) { alert("Choose an audio file first."); return; }
     const fd = new FormData(e.target);
+    if (chosen) fd.delete("file");
+    else fd.delete("track");
     const q = QUALITY[fd.get("quality")];
     fd.delete("quality");
     fd.set("roll_steps", q.roll_steps);
     fd.set("note_steps", q.note_steps);
     const btn = $("#upload-btn");
-    btn.disabled = true; btn.textContent = "Uploading…";
+    btn.disabled = true; btn.textContent = chosen ? "Starting…" : "Uploading…";
     try {
       const job = await (await api("/api/jobs", { method: "POST", body: fd })).json();
       await selectJob(job.id);
-    } catch (err) { alert("Upload failed: " + err.message); }
-    btn.disabled = false; btn.textContent = "Upload and fit";
+    } catch (err) { alert((chosen ? "Could not start the fit: " : "Upload failed: ") + err.message); }
+    btn.disabled = false; btn.textContent = chosen ? "Fit" : "Upload and fit";
   };
 
   $("#demo-btn").onclick = async () => {
@@ -691,10 +878,19 @@ function wire() {
 }
 
 async function main() {
+  S.keyboard = setupKeyboard({
+    getPatch: () => S.patches[S.voice],
+    getHarmonics: () => S.job.result.n_harmonics,
+    getSampleRate: () => S.job.result.sr,
+    isActive: () => !$("#result-view").hidden && !!S.patches && !!S.job && !!S.job.result,
+    noteName,
+    defaultSlide: () => !!(S.job && S.job.config.lead),
+  });
   S.specs = await (await api("/api/specs")).json();
   $("#separate-wrap").hidden = !S.specs.tools.demucs;
   $("#basic-pitch-wrap").hidden = !S.specs.tools.basic_pitch;
   wire();
+  refreshLibrary();
   await refreshJobs();
   setInterval(refreshJobs, 4000);
   const m = location.hash.match(/job=(\w+)/);

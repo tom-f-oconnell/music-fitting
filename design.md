@@ -485,6 +485,56 @@ CPU for the sliders (well under a second for a few seconds of audio), so
 re-renders compete with a CPU fit but not a GPU one. The frontend is plain JS
 with no build step; spectrograms are computed in the browser.
 
+**Playing the patch** (`keyboard.js`). The Play box needs a note to start when the key
+goes down, which rules out rendering on the server. `LiveSynth` is the synth rebuilt as
+a Web Audio graph, at the fit's sample rate, so its harmonics stop where the Python
+synth's do: a `PeriodicWave` from the same Fourier series, two cascaded biquads for the
+24 dB/oct filter with the filter envelope on `detune` (exactly the synth's exponential
+sweep), `setTargetAtTime` for the exponential envelope stages, a `WaveShaper` for the
+drive, a `DelayNode` loop and a `ConvolverNode` on a noise impulse response. Other ways
+to do it:
+
+* **An AudioWorklet** running a sample-for-sample port would match more closely, but
+  browsers only allow worklets over HTTPS or on localhost, and this app is often reached
+  over plain HTTP from another machine.
+* **Samples pre-rendered by the server** need a new set of renders after every slider
+  move, and can't hold a note for as long as the key is down without looping.
+
+`tests/test_keyboard.py` renders ten patches in headless Chrome and compares them with
+`render.py`. Levels agree within 2 %; the reverb's varies with its random impulse response
+(1.2 in the runs seen, but 0.85–1.31 between noise seeds in Python alone). Above −40 dB the
+spectral distance is 0.17–0.68 against 1.4–3.0 for a different patch, apart from the
+reverb and noise, whose fine structure is random. Remaining differences: real biquads shift
+phase and warp near Nyquist where the Python filter is an ideal magnitude response, and the
+fitted drums aren't played. Effects and filter settings reach held notes at once; envelopes
+apply from the next note.
+
+The layout is [Ableton Live's](https://www.ableton.com/en/manual/midi-and-key-remote-control/):
+keys go by physical position (`KeyboardEvent.code`), so it stays piano-shaped on any
+layout. Ableton's manual gives the rows, Z/X and C/V in steps of 20 but not every letter,
+so the top end (`;` and `'`) and the velocity ladder 1, 20, …, 120, 127 are from memory of
+Live itself. A is MIDI note 60, which Ableton names C3 and this app, like the piano roll,
+names C4.
+
+**Cached data** (`dataset/library.py`, `web/downloads.py`). Every subdirectory of
+`MUSICFIT_DATA` is a dataset, recognised by its layout (a `manifest.jsonl`, BabySlakh's
+`Track*/`, or plain audio files), so data from the command-line builder or copied in by
+hand is listed without being re-downloaded, and "downloading" a dataset that's already
+there only fetches what is missing. Fits read cached files where they are, rather than
+copying them into the job. A run here means fitting one clip, so the list chooses one track;
+there is no training over a whole dataset yet, though jobs do queue.
+
+Shipped examples are short BabySlakh clips (CC BY 4.0, `examples/ATTRIBUTION.md`). The
+clips the fitter was developed on are copyrighted and this repository is public, so they
+aren't committed; they appear among the examples if the data is on disk.
+
+The server has no login and may be exposed to a network, so clients get a narrow API: a
+search string, a link whose host is YouTube's, or a Zenodo record number, never an arbitrary
+URL (yt-dlp would fetch from a thousand sites, or from inside the network) or a path. Track
+ids are resolved to real paths and must stay inside the dataset, as audio files. Archives
+are checked against a size limit and unpacked with tar's `data` filter, which refuses
+members that land outside the destination. There is deliberately no delete button.
+
 ## Limitations / open problems
 
 * Pitch is discrete in stage 1 (one row per semitone) and continuous only

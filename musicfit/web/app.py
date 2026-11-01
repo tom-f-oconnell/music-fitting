@@ -2,6 +2,7 @@
 
     uvicorn musicfit.web.app:app --port 43153          # then open http://localhost:43153
     MUSICFIT_JOBS=/path/to/jobs uvicorn ...            # where jobs and results are stored
+    MUSICFIT_DATA=/path/to/data uvicorn ...            # where downloaded datasets are cached
 """
 
 from __future__ import annotations
@@ -16,9 +17,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from ..dataset.library import Library
 from ..notes import write_midi
 from ..synth import PARAM_SPECS, WAVEFORMS
 from ..tools import available_tools
+from .downloads import DownloadManager
 from .jobs import JobManager
 from .render import notes_from_dicts, render, spectral_loss, wav_bytes
 
@@ -104,10 +107,21 @@ class MidiRequest(BaseModel):
     tempo_bpm: float = 120.0
 
 
-def create_app(jobs_dir: str | None = None) -> FastAPI:
+class DownloadRequest(BaseModel):
+    preset: str = ""  # a ready-made dataset, or:
+    source: str = ""  # a key of downloads.SOURCES
+    query: str = Field("", max_length=500)
+    name: str = Field("", max_length=100)
+    limit: int = Field(25, ge=1, le=500)
+
+
+def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> FastAPI:
     jobs = JobManager(jobs_dir or os.environ.get("MUSICFIT_JOBS", os.path.join(os.getcwd(), "web_jobs")))
+    library = Library(data_dir or os.environ.get("MUSICFIT_DATA", os.path.join(os.getcwd(), "data")))
+    downloads = DownloadManager(library)
     app = FastAPI(title="musicfit")
     app.state.jobs = jobs
+    app.state.downloads = downloads
 
     @functools.lru_cache(maxsize=8)
     def target_of(job_id: str):
@@ -144,7 +158,8 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
 
     @app.post("/api/jobs")
     async def create_job(
-        file: UploadFile = File(...),
+        file: UploadFile | None = File(None),
+        track: str = Form(""),
         offset: float = Form(0.0),
         duration: float = Form(4.0),
         voices: int = Form(1),
@@ -165,6 +180,13 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
         tools = available_tools()
         if (separate and not tools["demucs"]) or (basic_pitch and not tools["basic_pitch"]):
             raise HTTPException(422, "that tool is not installed; see requirements-tools.txt")
+        cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
+                   note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
+                   seed=seed, lead=lead, separate=separate, basic_pitch=basic_pitch)
+        if track:
+            return jobs.submit_library(library.title(track), library.resolve(track), cfg).public()
+        if file is None:
+            raise HTTPException(422, "upload a file or choose a track")
         fd, tmp = tempfile.mkstemp(dir=jobs.root)
         size = 0
         with os.fdopen(fd, "wb") as out:
@@ -175,9 +197,6 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
                     os.unlink(tmp)
                     raise HTTPException(413, "file too large")
                 out.write(chunk)
-        cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
-                   note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
-                   seed=seed, lead=lead, separate=separate, basic_pitch=basic_pitch)
         job = jobs.submit_upload(os.path.basename(file.filename or "upload"), tmp, cfg)
         return job.public()
 
@@ -208,6 +227,29 @@ def create_app(jobs_dir: str | None = None) -> FastAPI:
             raise HTTPException(409, "cancel the job first")
         del jobs.jobs[job_id]
         shutil.rmtree(jobs.dir(job_id), ignore_errors=True)
+        return {"ok": True}
+
+    @app.get("/api/library")
+    def list_library():
+        return {"root": library.root, "datasets": library.datasets(), **downloads.state()}
+
+    @app.get("/api/library/audio")
+    def library_audio(track: str):
+        try:
+            return FileResponse(library.resolve(track))
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/library/downloads")
+    def start_download(req: DownloadRequest):
+        if req.preset:
+            return downloads.submit_preset(req.preset)
+        return downloads.submit(req.source, req.query, req.name, req.limit)
+
+    @app.post("/api/library/downloads/{download_id}/cancel")
+    def cancel_download(download_id: str):
+        if not downloads.cancel(download_id):
+            raise HTTPException(404, "no such download")
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/audio/{which}.wav")

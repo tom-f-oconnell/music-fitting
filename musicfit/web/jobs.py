@@ -28,7 +28,7 @@ class Cancelled(Exception):
 class Job:
     id: str
     name: str
-    kind: str  # "upload" | "demo"
+    kind: str  # "upload" | "library" | "demo"
     config: dict
     created: float = field(default_factory=time.time)
     status: str = "queued"  # queued | running | done | failed | cancelled
@@ -100,6 +100,12 @@ class JobManager:
         self._pool.submit(self._run, job)
         return job
 
+    def submit_library(self, name: str, path: str, cfg: dict) -> Job:
+        """Fit a cached file, which stays where it is."""
+        job = self._new(name, "library", {**cfg, "source_path": path})
+        self._pool.submit(self._run, job)
+        return job
+
     def submit_demo(self, cfg: dict) -> Job:
         job = self._new(f"synthetic demo (seed {cfg.get('seed', 1)})", "demo", cfg)
         self._pool.submit(self._run, job)
@@ -167,9 +173,8 @@ class JobManager:
                 target, ref, true_params = synthetic_target(
                     int(c.get("seed", 1)), float(c.get("length", 3.0)), int(c.get("notes", 10)), cfg.sr)
             else:
-                upload = next(f for f in os.listdir(d) if f.startswith("upload"))
-                target = load_audio(os.path.join(d, upload), cfg.sr, float(c.get("offset", 0.0)),
-                                    float(c.get("duration", 4.0)))
+                source = c.get("source_path") or os.path.join(d, next(f for f in os.listdir(d) if f.startswith("upload")))
+                target = load_audio(source, cfg.sr, float(c.get("offset", 0.0)), float(c.get("duration", 4.0)))
                 if target.numel() < cfg.sr * 0.25:
                     raise ValueError("decoded clip is shorter than 0.25 s; check offset/duration")
                 target = target / (target.abs().max() + 1e-8) * 0.5

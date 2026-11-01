@@ -14,7 +14,9 @@ use as an alias.
 
 from __future__ import annotations
 
-from .catalog import Work, dedupe_works
+from typing import Callable
+
+from .catalog import Work, dedupe_works, musicbrainz_tracks, normalize_title
 
 ARTIST = "Aphex Twin"
 
@@ -125,4 +127,46 @@ def curated_works(include_eps: bool = True) -> list[Work]:
         for i, (title, dur) in enumerate(tracks, start=1):
             works.append(Work(title=title, artist=ARTIST, album=album, duration_s=float(dur), year=year,
                               track_no=i, aliases=list(SEARCH_ALIASES.get(title, []))))
+    return dedupe_works(works)
+
+
+def aphex_twin_works(source: str = "auto", all_releases: bool = False, include_eps: bool = True,
+                     log: Callable[[str], None] = print) -> list[Work]:
+    """The works of the training set, with search aliases from the curated list.
+
+    Args:
+        source: "musicbrainz", "curated", or "auto" for MusicBrainz, then curated on failure.
+        all_releases: with MusicBrainz, every official album/EP rather than the major ones.
+        include_eps: also take EPs, not only albums.
+        log: where to report which catalogue was used.
+
+    Returns:
+        De-duplicated works.
+    """
+    works = None
+    if source in ("auto", "musicbrainz"):
+        try:
+            albums = None if all_releases else list(ALBUMS) + (list(EPS) if include_eps else [])
+            works = musicbrainz_tracks(ARTIST, albums=albums, include_eps=include_eps)
+            # attach search aliases (SAW II "#n" names etc.) from the curated list, matching
+            # on curated aliases too (MusicBrainz "Mold" is the curated "Mould"); titles take
+            # precedence, so the RDJ Album track "4" doesn't pick up SAW II's "#4"
+            cur = curated_works(include_eps=True)
+            curated = {c.key: c for c in cur}
+            for c in cur:
+                for name in c.aliases:
+                    curated.setdefault(normalize_title(name), c)
+            for w in works:
+                c = curated.get(w.key)
+                if c is not None:
+                    extra = [a for a in [c.title] + c.aliases if normalize_title(a) != w.key]
+                    w.aliases = list(dict.fromkeys(w.aliases + extra))
+            log(f"MusicBrainz catalogue: {len(works)} distinct works")
+        except Exception as e:  # noqa: BLE001
+            if source == "musicbrainz":
+                raise
+            log(f"MusicBrainz unavailable ({type(e).__name__}: {e}); using curated catalogue")
+    if works is None:
+        works = curated_works(include_eps=include_eps)
+        log(f"Curated catalogue: {len(works)} distinct works")
     return dedupe_works(works)

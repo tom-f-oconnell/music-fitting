@@ -19,11 +19,12 @@ venv/bin/uvicorn musicfit.web.app:app --port 43153
 
 Then open http://localhost:43153.
 
-* **Fit a clip:** choose an audio file (anything ffmpeg can read), where the
-  clip starts and how long it is (up to 15 s), how many voices (synth
-  patches) to fit, and a preset (Standard, or Quick, which leaves slightly
-  more spurious notes). Or click **Run demo fit** to fit a random synthetic melody
-  whose true notes and patch are shown for comparison.
+* **Fit a clip:** under *Audio*, pick an example or a track you've downloaded, or
+  upload a file (anything ffmpeg can read). Choose where the clip starts and how
+  long it is (up to 15 s), how many voices (synth patches) to fit, and a preset
+  (Standard, or Quick, which leaves slightly more spurious notes). Or click **Run
+  demo fit** to fit a random synthetic melody whose true notes and patch are shown
+  for comparison.
 * **Listen and compare:** spectrograms of the original and the fit, a piano
   roll of the fitted notes, and playback of original / fit / your tweaked
   version, switching at the same position (space plays and stops).
@@ -34,6 +35,14 @@ Then open http://localhost:43153.
   stay in every re-render unless you tick *Mute drums & noise*.
 * **Mono lead or acid line:** under Advanced, this also fits slides between
   notes and more harmonics, and takes about two-thirds longer.
+* **Play:** the box below the patch plays it live, with the mouse or your computer
+  keyboard, laid out like Ableton Live's: A to ' are the white keys, W E T Y U O P
+  the black ones, Z/X change the octave, C/V the velocity, and M turns it off.
+* **Get more audio:** the **Data** menu downloads the datasets this was developed
+  on, or similar ones: an artist's albums, a YouTube search or playlist, or a
+  Zenodo record. Downloads are kept on disk, can be stopped and resumed, and appear
+  under *Audio*. Downloading copyrighted music is subject to YouTube's terms and
+  local law; this is for personal research use.
 * **Export:** patch JSON (re-importable), MIDI, notes JSON, and the WAV.
 
 It works best on short, sparse synth lines. On its own it finds few of the
@@ -41,7 +50,8 @@ notes in busy music, so for anything dense install the two optional helpers
 below and tick *Start from an automatic transcription* under Advanced (see
 [design.md](design.md#real-recordings) for measurements). A fit takes about a
 minute on an NVIDIA GPU, which is used automatically, and several minutes on
-a CPU. There is no login, so only run the app on your own machine.
+a CPU. There is no login, and anyone who can reach the app can also start downloads
+onto your disk, so only run it on your own machine.
 
 **Optional helpers for busy music** (Advanced shows their checkboxes once they
 are installed; Demucs downloads its model the first time it runs):
@@ -87,11 +97,19 @@ From Python, `musicfit.fit.fit(audio_tensor, FitConfig(...))`; `FitConfig`
 documents every knob.
 
 **Web app:** `MUSICFIT_JOBS=/path` sets where jobs are stored (default
-`./web_jobs`). HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
-`POST /api/jobs` (multipart: `file`, `offset`, `duration`, `voices`,
+`./web_jobs`), `MUSICFIT_DATA=/path` where datasets are cached (default `./data`,
+where `build_aphex_twin_dataset.py` and any folder of audio files also show up),
+`MUSICFIT_YT_COOKIES=/path/to/cookies.txt` gives downloads browser cookies if YouTube
+asks you to sign in, and `MUSICFIT_MAX_DOWNLOAD_GB` limits a Zenodo record (default
+10). YouTube searches and playlists skip videos over 20 minutes.
+HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
+`POST /api/jobs` (multipart: `file` or `track`, `offset`, `duration`, `voices`,
 `roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,
 `separate`, `basic_pitch`; the last two only if `tools` in `/api/specs` says they are installed),
 `POST /api/jobs/demo`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
+`GET /api/library` (cached tracks and downloads), `GET /api/library/audio?track=`,
+`POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
+`POST /api/library/downloads/{id}/cancel`,
 `DELETE /api/jobs/{id}`, `GET /api/jobs/{id}/audio/{target|fit}.wav`,
 `POST /api/jobs/{id}/render` (`{patches, notes, muted_voices}` → WAV, loss in
 the `X-Spectral-Loss` header), `POST /api/midi` (`{notes}` → .mid).
@@ -128,9 +146,9 @@ musicfit/
   audio_io.py     ffmpeg-based loading, wav saving
   synthetic.py    synthetic targets with known notes: random melodies, 303-style lines
   slakh.py        BabySlakh clips with their true notes
-  web/            FastAPI app (app.py), background jobs (jobs.py), fast re-render (render.py), static/ UI
-  dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py)
-scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, eval_slakh.py, build_aphex_twin_dataset.py
+  web/            FastAPI app (app.py), background jobs and downloads (jobs.py, downloads.py), fast re-render (render.py), static/ UI (keyboard.js: the live synth)
+  dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py), cached data and Zenodo (library.py), example clips
+scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, eval_slakh.py, build_aphex_twin_dataset.py, make_examples.py
 tests/
 ```
 
@@ -139,6 +157,6 @@ evaluation on synthetic targets and BabySlakh (and why single runs are
 misleading), what was tried, the dataset matching rules, and the open problems.
 
 ```
-venv/bin/python -m pytest             # unit tests (network tests deselected)
+venv/bin/python -m pytest             # unit tests (network tests deselected; the keyboard's need Chrome, else skipped)
 venv/bin/python -m pytest -m network  # also query MusicBrainz
 ```

@@ -24,6 +24,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from typing import Callable
 
 from .catalog import Work, normalize_title
 
@@ -121,16 +122,16 @@ def score_candidate(work: Work, cand: Candidate, duration_tol: float = 0.08, min
     elif cand.duration_s is None:
         score -= 0.5
 
-    if is_preferred_uploader(cand):
+    if is_preferred_uploader(cand, work.artist):
         score += 2.0
     if cand.view_count:
         score += min(cand.view_count, 10_000_000) / 10_000_000  # small tie-breaker
     return score
 
 
-def is_preferred_uploader(cand: Candidate) -> bool:
+def is_preferred_uploader(cand: Candidate, artist: str = "") -> bool:
     up = (cand.uploader or "").lower()
-    return any(p in up for p in PREFERRED_UPLOADERS)
+    return any(p in up for p in PREFERRED_UPLOADERS) or (bool(artist) and artist.lower() in up)
 
 
 def choose_candidate(work: Work, candidates: list[Candidate], **kw) -> tuple[Candidate | None, float]:
@@ -150,6 +151,12 @@ def slugify(text: str, max_len: int = 80) -> str:
 # ---------------------------------------------------------------------------
 # yt-dlp wrapper
 # ---------------------------------------------------------------------------
+
+
+def _candidate(e: dict) -> Candidate:
+    return Candidate(video_id=e["id"], title=e.get("title") or "", duration_s=e.get("duration"),
+                     uploader=e.get("uploader") or e.get("channel") or "", channel_id=e.get("channel_id") or "",
+                     view_count=e.get("view_count"))
 
 
 class YouTubeClient:
@@ -174,16 +181,17 @@ class YouTubeClient:
     def search(self, query: str, n: int = 8) -> list[Candidate]:
         with yt_dlp.YoutubeDL(self._opts(extract_flat="in_playlist", skip_download=True)) as ydl:
             info = ydl.extract_info(f"ytsearch{n}:{query}", download=False)
-        out = []
-        for e in (info or {}).get("entries") or []:
-            if not e or not e.get("id"):
-                continue
-            out.append(Candidate(
-                video_id=e["id"], title=e.get("title") or "", duration_s=e.get("duration"),
-                uploader=e.get("uploader") or e.get("channel") or "", channel_id=e.get("channel_id") or "",
-                view_count=e.get("view_count"),
-            ))
-        return out
+        return [_candidate(e) for e in (info or {}).get("entries") or [] if e and e.get("id")]
+
+    def list_url(self, url: str, limit: int | None = None) -> list[Candidate]:
+        """The videos behind a link to a video or a playlist, at most ``limit`` of them."""
+        opts = self._opts(extract_flat="in_playlist", skip_download=True, noplaylist=False, playlistend=limit)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not info:
+            return []
+        entries = info.get("entries")
+        return [_candidate(e) for e in (entries if entries is not None else [info]) if e and e.get("id")][:limit]
 
     def download_audio(self, video_id: str, out_path_no_ext: str, codec: str = "opus", quality: str = "0") -> str:
         """Download best audio and convert with ffmpeg; returns the written file path."""
@@ -246,8 +254,13 @@ def build_dataset(
     retry_failed: bool = False,
     verbose: bool = True,
     duration_tol: float = 0.08,
+    on_progress: Callable[[int, int, ManifestEntry], None] | None = None,
 ) -> Manifest:
-    """Search, de-duplicate and download every work; returns the updated manifest."""
+    """Search, de-duplicate and download every work; returns the updated manifest.
+
+    ``on_progress(i, n_works, entry)`` is called after each work; raising from it stops
+    the run, and the works done so far are kept for the next one to resume from.
+    """
     os.makedirs(os.path.join(out_dir, "audio"), exist_ok=True)
     manifest = Manifest(os.path.join(out_dir, "manifest.jsonl"))
     seen_videos = manifest.downloaded_video_ids()
@@ -256,6 +269,8 @@ def build_dataset(
         prev = manifest.entries.get(work.key)
         # "skipped" entries are picks from an earlier dry run: always (re)process those
         if prev is not None and (prev.status == "ok" or (prev.status != "skipped" and not retry_failed)):
+            if on_progress:
+                on_progress(i, len(works), prev)
             continue
         label = f"[{i}/{len(works)}] {work.artist} - {work.title}"
         entry = ManifestEntry(work.key, work.title, work.artist, work.album, work.duration_s, status="not_found")
@@ -265,7 +280,7 @@ def build_dataset(
             for q in queries:
                 candidates += client.search(q, n_search)
                 best, score = choose_candidate(work, candidates, duration_tol=duration_tol)
-                if best is not None and is_preferred_uploader(best):
+                if best is not None and is_preferred_uploader(best, work.artist):
                     break  # else an alias (SAW II "#n") may still find the official upload
             # dedupe candidates by id, keep for the record
             uniq = {c.video_id: c for c in candidates}
@@ -305,6 +320,54 @@ def build_dataset(
                 print(f"{label}: search failed: {entry.error}")
         if not dry_run or prev is None or prev.status == "skipped":
             manifest.add(entry)
+        if on_progress:
+            on_progress(i, len(works), entry)
         if client.sleep_between and not dry_run:
             time.sleep(client.sleep_between)
+    return manifest
+
+
+def download_videos(
+    videos: list[Candidate],
+    out_dir: str,
+    client: YouTubeClient,
+    codec: str = "opus",
+    max_duration_s: float | None = None,
+    on_progress: Callable[[int, int, ManifestEntry], None] | None = None,
+) -> Manifest:
+    """Download videos as they are, with no catalogue to match them against.
+
+    Args:
+        videos: what to download, e.g. from :meth:`YouTubeClient.search`.
+        out_dir: dataset directory; re-running skips videos already there.
+        client: the YouTube client.
+        codec: ffmpeg audio codec for yt-dlp.
+        max_duration_s: skip longer videos (hours-long mixes), if given.
+        on_progress: as for :func:`build_dataset`.
+
+    Returns:
+        The updated manifest, with one entry per video keyed by its id.
+    """
+    os.makedirs(os.path.join(out_dir, "audio"), exist_ok=True)
+    manifest = Manifest(os.path.join(out_dir, "manifest.jsonl"))
+    for i, video in enumerate(videos, start=1):
+        entry = manifest.entries.get(video.video_id)
+        if entry is None or entry.status != "ok":
+            entry = ManifestEntry(video.video_id, video.title, video.uploader, None, None, status="skipped",
+                                  video_id=video.video_id, video_title=video.title, video_url=video.url,
+                                  uploader=video.uploader, video_duration_s=video.duration_s)
+            if max_duration_s and video.duration_s and video.duration_s > max_duration_s:
+                entry.error = f"longer than {max_duration_s:.0f} s"
+            else:
+                base = os.path.join(out_dir, "audio", f"{slugify(video.title)}_{video.video_id}")
+                try:
+                    entry.file = os.path.relpath(client.download_audio(video.video_id, base, codec), out_dir)
+                    entry.status = "ok"
+                except Exception as e:  # noqa: BLE001
+                    entry.status, entry.error = "download_failed", f"{type(e).__name__}: {e}"
+            manifest.add(entry)
+            if client.sleep_between:
+                time.sleep(client.sleep_between)
+        if on_progress:
+            on_progress(i, len(videos), entry)
     return manifest

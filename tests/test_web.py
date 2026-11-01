@@ -29,7 +29,7 @@ def _wait(client, job_id, timeout=300):
 
 @pytest.fixture()
 def client(tmp_path):
-    return TestClient(create_app(str(tmp_path / "jobs")))
+    return TestClient(create_app(str(tmp_path / "jobs"), str(tmp_path / "data")))
 
 
 def test_demo_job_render_and_exports(client):

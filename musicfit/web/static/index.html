@@ -9,6 +9,7 @@
 <body>
 <header class="top">
   <div class="brand">musicfit <span>fit a synth + notes to audio, then play with the patch</span></div>
+  <nav class="menu"><button id="data-btn">Data</button></nav>
 </header>
 
 <div class="layout">
@@ -16,10 +17,17 @@
     <section class="card">
       <h2>Fit a clip</h2>
       <form id="upload-form">
+        <label>Audio
+          <select name="track" id="track"><option value="">Upload a file</option></select>
+        </label>
         <label class="drop" id="drop">
           <input type="file" id="file" name="file" accept="audio/*,video/*,.opus,.flac,.m4a,.ogg,.wav,.mp3">
           <span id="drop-text">Drop an audio file here or click to choose</span>
         </label>
+        <div id="track-info" hidden>
+          <audio id="track-preview" controls preload="none"></audio>
+          <p class="hint" id="track-note"></p>
+        </div>
         <div class="row">
           <label>Start (s)<input type="number" name="offset" value="0" min="0" step="0.1"></label>
           <label>Length (s)<input type="number" name="duration" value="4" min="0.25" max="15" step="0.25"></label>
@@ -50,6 +58,7 @@
           <label class="check" id="basic-pitch-wrap" hidden><input type="checkbox" name="basic_pitch"> Start from an automatic transcription (basic-pitch; finds far more notes in busy music)</label>
         </details>
         <button type="submit" class="primary" id="upload-btn">Upload and fit</button>
+        <p class="hint">More audio to choose from: <button type="button" class="link" id="more-data">download a dataset</button>.</p>
       </form>
     </section>
 
@@ -133,6 +142,25 @@
           <div id="sliders" class="slider-grid"></div>
         </section>
 
+        <section class="card play">
+          <div class="synth-head">
+            <h2>Play</h2>
+            <div class="stepper">Keys <b id="kbd-range"></b>
+              <button id="kbd-octave-down" class="small" title="Octave down (Z)">Z −</button>
+              <button id="kbd-octave-up" class="small" title="Octave up (X)">X +</button>
+            </div>
+            <div class="stepper">Velocity <b id="kbd-velocity"></b>
+              <button id="kbd-velocity-down" class="small" title="Softer (C)">C −</button>
+              <button id="kbd-velocity-up" class="small" title="Harder (V)">V +</button>
+            </div>
+            <div class="spacer"></div>
+            <label class="check" title="Each new note glides in from the one you are still holding, at the glide time above"><input type="checkbox" id="kbd-slide"> Slide between held notes</label>
+            <label class="check" title="Press M to switch this on and off"><input type="checkbox" id="kbd-on"> Computer keyboard (M)</label>
+          </div>
+          <div id="piano" class="piano"></div>
+          <p class="hint">Plays the patch above, as it is now, for the voice selected there. The keys are laid out like Ableton Live's computer MIDI keyboard: A to &#39; are the white keys and W E T Y U O P the black ones, starting from middle C (which Ableton calls C3), with Z/X for the octave and C/V for the velocity. Drums aren't included.</p>
+        </section>
+
         <section class="card exports">
           <h2>Export</h2>
           <div class="buttons">
@@ -147,6 +175,39 @@
     </div>
   </main>
 </div>
+
+<dialog id="data-dialog" class="data-dialog">
+  <div class="synth-head">
+    <h2>Data</h2>
+    <div class="spacer"></div>
+    <button id="data-close" class="small">Close</button>
+  </div>
+  <p class="hint">Downloads are kept in <code id="data-root"></code> and show up under Audio in the Fit a clip box. A stopped download continues where it left off if you start it again. Downloading copyrighted music is subject to YouTube's terms and local law; this is for personal research use.</p>
+
+  <h3>The datasets this project was developed on</h3>
+  <ul id="presets" class="data-list"></ul>
+
+  <h3>Download something similar</h3>
+  <form id="download-form">
+    <label>From<select name="source" id="dl-source"></select></label>
+    <label><span id="dl-query-label">What</span><input type="text" name="query" id="dl-query" required></label>
+    <div class="row">
+      <label>Name (optional)<input type="text" name="name" maxlength="100"></label>
+      <label id="dl-limit-wrap">At most this many tracks<input type="number" name="limit" value="25" min="1" max="500"></label>
+    </div>
+    <button type="submit" id="dl-start">Download</button>
+    <div id="dl-error" class="error" hidden></div>
+  </form>
+
+  <div id="downloads-wrap" hidden>
+    <h3>Downloads</h3>
+    <ul id="downloads" class="data-list"></ul>
+  </div>
+
+  <h3>Cached</h3>
+  <ul id="datasets" class="data-list"></ul>
+</dialog>
+<script src="keyboard.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
