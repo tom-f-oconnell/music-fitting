@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from musicfit.notes import Note  # noqa: E402
 from musicfit.web.app import create_app  # noqa: E402
+from musicfit.web.jobs import JobManager  # noqa: E402
 
 
 def _wait(client, job_id, timeout=300):
@@ -72,6 +74,46 @@ def test_demo_job_render_and_exports(client):
 
     midi = client.post("/api/midi", json={"notes": notes})
     assert midi.status_code == 200 and midi.content[:4] == b"MThd"
+
+
+def test_jobs_record_when_they_ran(client):
+    before = time.time()
+    job = client.post("/api/jobs/demo", json={"seed": 1, "length": 1.0, "notes": 2, "roll_steps": 4, "note_steps": 2}).json()
+    job = _wait(client, job["id"])
+    assert job["status"] == "done", job["error"]
+    assert before <= job["created"] <= job["started"] <= job["finished"] <= time.time()
+    assert job["finished"] - job["started"] == pytest.approx(job["elapsed_s"], abs=0.1)
+    listed = client.get("/api/jobs").json()[0]
+    assert (listed["started"], listed["finished"]) == (job["started"], job["finished"])
+
+
+def _old_record(root, job_id, status, elapsed, ended_at):
+    os.makedirs(root / job_id)
+    path = root / job_id / "job.json"
+    path.write_text(json.dumps({"id": job_id, "name": "old", "kind": "demo", "config": {}, "created": ended_at - elapsed - 30,
+                                "status": status, "elapsed_s": elapsed}))
+    os.utime(path, (ended_at, ended_at))
+
+
+def test_records_from_before_times_were_kept_get_them_from_their_files(tmp_path):
+    root = tmp_path / "jobs"
+    _old_record(root, "finished", "done", 57.0, 1_000_000.0)
+    _old_record(root, "interrupted", "running", 12.0, 2_000_000.0)
+    _old_record(root, "neverstarted", "queued", 0.0, 3_000_000.0)
+    jobs = JobManager(str(root)).jobs
+    assert (jobs["finished"].started, jobs["finished"].finished) == (1_000_000.0 - 57.0, 1_000_000.0)
+    assert (jobs["interrupted"].status, jobs["interrupted"].finished) == ("failed", 2_000_000.0)
+    assert jobs["interrupted"].started == 2_000_000.0 - 12.0
+    assert (jobs["neverstarted"].status, jobs["neverstarted"].started, jobs["neverstarted"].finished) == ("failed", None, 3_000_000.0)
+
+
+def test_times_survive_a_restart_and_a_cancelled_job_never_started(tmp_path):
+    manager = JobManager(str(tmp_path / "jobs"))
+    job = manager._new("waiting", "demo", {})
+    manager.cancel(job.id)
+    assert job.status == "cancelled" and job.started is None and job.finished is not None
+    again = JobManager(str(tmp_path / "jobs")).jobs[job.id]
+    assert (again.started, again.finished) == (None, job.finished)
 
 
 def test_upload_job(client, tmp_path):

@@ -31,6 +31,8 @@ class Job:
     kind: str  # "upload" | "library" | "demo"
     config: dict
     created: float = field(default_factory=time.time)
+    started: float | None = None  # when the worker began the fit; None if it never did
+    finished: float | None = None  # when it ended, however it ended
     status: str = "queued"  # queued | running | done | failed | cancelled
     stage: str = ""
     step: int = 0
@@ -84,6 +86,12 @@ class JobManager:
                 continue
             if job.status in ("queued", "running"):
                 job.status, job.error = "failed", "server restarted while the job was running"
+            if job.finished is None:
+                # saved before these times were kept, or cut off by a restart: a job's file is last
+                # written as it ends, and elapsed_s counts from when it started
+                job.finished = os.path.getmtime(path)
+                if job.started is None and job.elapsed_s:
+                    job.started = job.finished - job.elapsed_s
             self.jobs[job.id] = job
 
     # -- API -------------------------------------------------------------
@@ -114,7 +122,7 @@ class JobManager:
     def cancel(self, job_id: str) -> None:
         job = self.jobs[job_id]
         if job.status == "queued":
-            job.status = "cancelled"
+            job.status, job.finished = "cancelled", time.time()
             self._save(job)
         elif job.status == "running":
             self._cancel.add(job_id)
@@ -144,12 +152,19 @@ class JobManager:
         d = self.dir(job.id)
         c = job.config
         cfg = self._fit_config(c)
-        job.status = "running"
-        self._save(job)
         t0 = time.time()
+        job.status, job.started = "running", t0
+        self._save(job)
         total_steps = cfg.roll_steps + stage2_steps(cfg) + 2
         c["total_steps"] = total_steps  # for the loss chart's x axis
         last_save = [0.0]
+
+        def end(status: str, error: str | None = None) -> None:
+            # the times first: a client that sees the job has ended must also see when
+            job.finished = time.time()
+            job.elapsed_s = round(job.finished - t0, 1)
+            job.error = error
+            job.status = status
 
         def progress(info: dict) -> None:
             if job.id in self._cancel:
@@ -212,16 +227,15 @@ class JobManager:
                 "history": res.history,
                 "reference": reference,
             }
-            job.status, job.progress = "done", 1.0
+            job.progress = 1.0
+            end("done")
         except Cancelled:
-            job.status = "cancelled"
+            end("cancelled")
         except Exception as e:  # surfaced in the UI
-            job.status = "failed"
-            job.error = f"{type(e).__name__}: {e}"
+            end("failed", f"{type(e).__name__}: {e}")
             traceback.print_exc()
         finally:
             self._cancel.discard(job.id)
-            job.elapsed_s = round(time.time() - t0, 1)
             self._save(job)
 
     def target_audio(self, job_id: str) -> torch.Tensor:

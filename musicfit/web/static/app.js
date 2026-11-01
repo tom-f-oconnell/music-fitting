@@ -88,6 +88,36 @@ const baseName = () => (S.job ? S.job.name.replace(/\.[^.]+$/, "").replace(/[^\w
 
 // ---------------------------------------------------------------- jobs list
 
+function formatWhen(seconds, withSeconds = false) {
+  const d = new Date(seconds * 1000);
+  const parts = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  if (withSeconds) parts.second = "2-digit";
+  if (d.getFullYear() !== new Date().getFullYear()) parts.year = "numeric";
+  return d.toLocaleString([], parts);
+}
+function formatSpan(seconds) {
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+}
+// One line for the jobs list: when it ended, or if it hasn't, where it has got to.
+function jobWhen(j) {
+  if (j.status === "queued") return `Queued ${formatWhen(j.created)}`;
+  if (j.status === "running") return `Started ${formatWhen(j.started ?? j.created)}`;
+  const end = j.finished ?? j.created + j.elapsed_s;
+  const verb = { done: "Finished", failed: "Failed", cancelled: "Cancelled" }[j.status] || j.status;
+  if (!j.elapsed_s) return `${verb} ${formatWhen(end)}`;
+  return `${verb} ${formatWhen(end)}, ${j.status === "done" ? "took" : "after"} ${formatSpan(j.elapsed_s)}`;
+}
+// The whole story, for the job's header and the list's tooltip.
+function jobTimes(j) {
+  const parts = [j.started ? `Started ${formatWhen(j.started, true)}` : `Submitted ${formatWhen(j.created, true)}`];
+  if (j.finished) parts.push(`${{ done: "Finished", failed: "Failed", cancelled: "Cancelled" }[j.status] || "Ended"} ${formatWhen(j.finished, true)}`);
+  if (j.finished && j.elapsed_s) parts.push(`took ${formatSpan(j.elapsed_s)}`);
+  return parts.join(" · ");
+}
+
 async function refreshJobs() {
   let jobs;
   try { jobs = await (await api("/api/jobs")).json(); } catch (e) { return; }
@@ -98,9 +128,10 @@ async function refreshJobs() {
     const li = document.createElement("li");
     li.className = "job" + (j.id === S.jobId ? " active" : "");
     const pct = j.status === "running" ? ` ${Math.round(j.progress * 100)}%` : "";
-    li.innerHTML = `<span class="jname"></span><span class="badge ${j.status}">${j.status}${pct}</span>`;
+    li.innerHTML = `<div class="jmain"><span class="jname"></span><span class="badge ${j.status}">${j.status}${pct}</span></div><div class="jwhen"></div>`;
     li.querySelector(".jname").textContent = j.name;
-    li.title = new Date(j.created * 1000).toLocaleString();
+    li.querySelector(".jwhen").textContent = jobWhen(j);
+    li.title = jobTimes(j);
     li.onclick = () => selectJob(j.id);
     ul.appendChild(li);
   }
@@ -143,6 +174,7 @@ function showJobHead(job) {
   const st = $("#job-status");
   st.className = "badge " + job.status;
   st.textContent = job.status;
+  $("#job-times").textContent = jobTimes(job);
   const active = job.status === "queued" || job.status === "running";
   $("#cancel-btn").hidden = !active;
   $("#delete-btn").hidden = active;

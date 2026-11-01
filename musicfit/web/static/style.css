@@ -47,7 +47,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-
 .drop.over, .drop:hover { border-color: var(--accent); color: var(--text); }
 .drop input { display: none; }
 .jobs { list-style: none; margin: 0; padding: 0; }
-.jobs li.job { padding: 7px 8px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+.jobs li.job { padding: 7px 8px; border-radius: 6px; cursor: pointer; }
+.jobs .jmain { display: flex; justify-content: space-between; gap: 8px; }
+.jobs .jwhen { color: var(--muted); font-size: 11px; margin-top: 2px; }
+#job-times { margin: 4px 0 0; }
 .jobs li.job:hover { background: var(--panel-2); }
 .jobs li.job.active { background: var(--panel-2); outline: 1px solid var(--line); }
 .jobs .jname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
