@@ -103,7 +103,9 @@ documents every knob.
 where `build_aphex_twin_dataset.py` and any folder of audio files also show up),
 `MUSICFIT_YT_COOKIES=/path/to/cookies.txt` gives downloads browser cookies if YouTube
 asks you to sign in, and `MUSICFIT_MAX_DOWNLOAD_GB` limits a Zenodo record (default
-10). YouTube searches and playlists skip videos over 20 minutes.
+10). YouTube searches and playlists skip videos over 20 minutes. Every request that changes
+something is logged with its time and client address to `requests.log` in the jobs folder, and
+the terminal shows the same for all requests; behind an SSH tunnel the address is the tunnel's.
 HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
 `POST /api/jobs` (multipart: `file` or `track`, `offset`, `duration`, `voices`,
 `roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,

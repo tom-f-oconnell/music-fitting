@@ -3,6 +3,8 @@
     uvicorn musicfit.web.app:app --port 43153          # then open http://localhost:43153
     MUSICFIT_JOBS=/path/to/jobs uvicorn ...            # where jobs and results are stored
     MUSICFIT_DATA=/path/to/data uvicorn ...            # where downloaded datasets are cached
+
+Requests that change something are logged with their time and address to requests.log among the jobs.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from ..tools import available_tools
 from .downloads import DownloadManager
 from .jobs import JobManager
 from .render import notes_from_dicts, render, spectral_loss, wav_bytes
+from .request_log import RequestLog, timestamp_server_logs
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 MAX_DURATION_S = 15.0
@@ -132,6 +135,8 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
     library = Library(data_dir or os.environ.get("MUSICFIT_DATA", os.path.join(os.getcwd(), "data")))
     downloads = DownloadManager(library)
     app = FastAPI(title="musicfit")
+    app.add_middleware(RequestLog, path=os.path.join(jobs.root, "requests.log"))
+    timestamp_server_logs()
     app.state.jobs = jobs
     app.state.downloads = downloads
 
