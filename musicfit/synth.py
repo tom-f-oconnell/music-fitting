@@ -78,6 +78,8 @@ PARAM_SPECS: dict[str, ParamSpec] = {
 # the fit has settled (fit.py), so it isn't given to the optimiser.
 NOT_TRAINED = ("unison_cents",)
 
+RELEASE_TAIL = 14  # time constants of the release after which a note is gone: -122 dB
+
 
 def _logit(u: float, eps: float = 1e-4) -> float:
     u = min(max(u, eps), 1 - eps)
@@ -287,6 +289,7 @@ class Synth(nn.Module):
         self.noise_seed = noise_seed
         self._noise: torch.Tensor | None = None
         self._sin_cache: dict = {}
+        self.sin_cache_limit = math.inf  # bytes of sinusoid tables to keep between renders of a roll
 
     def _white_noise(self, n: int, device) -> torch.Tensor:
         if self._noise is None or self._noise.shape[0] < n or self._noise.device != torch.device(device):
@@ -340,10 +343,12 @@ class Synth(nn.Module):
     def _sinusoids(self, freqs, phase_ref, time_warp, n_samples, cache_key):
         if phase_ref is None and cache_key is not None:
             key = (cache_key, n_samples, freqs.shape)
-            if key not in self._sin_cache:
-                self._sin_cache.clear()
-                self._sin_cache[key] = self._compute_sin(freqs.detach(), None, None, n_samples)
-            return self._sin_cache[key]
+            if key in self._sin_cache:
+                return self._sin_cache[key]
+            table = self._compute_sin(freqs.detach(), None, None, n_samples)
+            if sum(t.numel() * 4 for t in self._sin_cache.values()) + table.numel() * 4 <= self.sin_cache_limit:
+                self._sin_cache[key] = table
+            return table
         return self._compute_sin(freqs, phase_ref, time_warp, n_samples)
 
     def _compute_sin(self, freqs, phase_ref, time_warp, n_samples):
@@ -381,8 +386,27 @@ class Synth(nn.Module):
         previous note), settling with the patch's glide_time; None for no glides.
         """
         p = self.params.values()
+        return self.effects(p, self.render_notes_dry(p, pitch, onset, duration, velocity, n_samples, glide))
+
+    def render_notes_dry(
+        self,
+        p: dict[str, torch.Tensor],
+        pitch: torch.Tensor,
+        onset: torch.Tensor,
+        duration: torch.Tensor,
+        velocity: torch.Tensor,
+        n_samples: int,
+        glide: torch.Tensor | None = None,
+        first_sample: int = 0,
+        clip_samples: int | None = None,
+    ) -> torch.Tensor:
+        """render_notes before the effects, optionally for only part of a longer clip.
+
+        first_sample: where in the clip this render starts; onsets are relative to it.
+        clip_samples: length of the whole clip, which fixes the noise; default n_samples.
+        """
         if pitch.numel() == 0:
-            return self.effects(p, torch.zeros(n_samples, device=p["gain"].device))
+            return torch.zeros(n_samples, device=p["gain"].device)
         t = torch.arange(n_samples, device=pitch.device, dtype=torch.float32) / self.sr
         t_rel = t[None, :] - onset[:, None]
         dur = duration[:, None]
@@ -400,8 +424,59 @@ class Synth(nn.Module):
             x = sum(self.render_partials(p, midi_to_hz(pitch + c * spread / 100), onset + shift, amp, fenv, n_samples,
                                          time_warp=warp)
                     for c, shift in ((-1, 0.0021), (0, 0.0), (1, 0.0037))) / math.sqrt(3)
-        x = x + p["noise_level"] * amp.sum(0) * self._white_noise(n_samples, x.device)
-        return self.effects(p, x)
+        noise = self._white_noise(clip_samples or n_samples, x.device)[first_sample:first_sample + n_samples]
+        return x + p["noise_level"] * amp.sum(0) * noise
+
+    def render_notes_window(
+        self,
+        pitch: torch.Tensor,
+        onset: torch.Tensor,
+        duration: torch.Tensor,
+        velocity: torch.Tensor,
+        n_samples: int,
+        glide: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Render notes dry over just the samples where they sound, for notes close together in time.
+
+        Args:
+            pitch, onset, duration, velocity, glide: as for render_notes, for at least one note.
+            n_samples: length of the clip.
+
+        Returns:
+            (audio, the sample of the clip where it starts). Empty if the notes are outside the clip.
+        """
+        p = self.params.values()
+        hop = self.control_hop
+        first = float(onset.detach().min())
+        last = float((onset + duration).detach().max()) + RELEASE_TAIL * float(p["amp_release"].detach())
+        # on the control-rate grid, so the filter is interpolated just as it is over a whole clip
+        start = min(max(int(first * self.sr) // hop * hop, 0), n_samples)
+        end = min((int(last * self.sr) // hop + 1) * hop, n_samples)
+        if end <= start:
+            return onset.new_zeros(0), start
+        x = self.render_notes_dry(p, pitch, onset - start / self.sr, duration, velocity, end - start, glide, start, n_samples)
+        return x, start
+
+    @torch.no_grad()
+    def render_notes_windowed(
+        self,
+        pitch: torch.Tensor,
+        onset: torch.Tensor,
+        duration: torch.Tensor,
+        velocity: torch.Tensor,
+        n_samples: int,
+        glide: torch.Tensor | None = None,
+        batch: int = 16,
+    ) -> torch.Tensor:
+        """render_notes for when no gradients are needed: the same sound in far less memory and time."""
+        p = self.params.values()
+        mix = torch.zeros(n_samples, device=p["gain"].device)
+        if pitch.numel():
+            for idx in torch.argsort(onset).split(batch):
+                y, start = self.render_notes_window(pitch[idx], onset[idx], duration[idx], velocity[idx], n_samples,
+                                                    None if glide is None else glide[idx])
+                mix[start:start + y.numel()] += y
+        return self.effects(p, mix)
 
     # -- piano-roll rendering ----------------------------------------------
 
@@ -422,6 +497,18 @@ class Synth(nn.Module):
         the roll (as an impulse train) with that row's ADSR kernel.
         """
         p = self.params.values()
+        return self.effects(p, self.render_roll_dry(p, onset_roll, pitches, frame_hop_s, duration, n_samples))
+
+    def render_roll_dry(
+        self,
+        p: dict[str, torch.Tensor],
+        onset_roll: torch.Tensor,
+        pitches: torch.Tensor,
+        frame_hop_s: float,
+        duration: torch.Tensor,
+        n_samples: int,
+    ) -> torch.Tensor:
+        """render_roll before the effects. Linear across pitch rows, so rows can be rendered apart."""
         sr = self.sr
         P, M = onset_roll.shape
         hop = int(round(frame_hop_s * sr))
@@ -442,5 +529,4 @@ class Synth(nn.Module):
 
         key = ("roll", tuple(pitches.tolist()))
         x = self.render_partials(p, midi_to_hz(pitches), None, amp, fenv, n_samples, cache_key=key)
-        x = x + p["noise_level"] * amp.sum(0) * self._white_noise(n_samples, x.device)
-        return self.effects(p, x)
+        return x + p["noise_level"] * amp.sum(0) * self._white_noise(n_samples, x.device)

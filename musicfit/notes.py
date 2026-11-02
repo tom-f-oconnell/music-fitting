@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 import struct
 from dataclasses import asdict, dataclass
+from functools import partial
 
 import torch
 import torch.nn as nn
 
+from .batching import Batch
 from .synth import Synth
 
 
@@ -66,6 +68,15 @@ class PianoRoll(nn.Module):
 
     def render(self, synth: Synth, n_samples: int) -> torch.Tensor:
         return synth.render_roll(self.strengths(), self.pitches, self.frame_hop_s, self.duration(), n_samples)
+
+    def batches(self, synth: Synth, n_samples: int, size: int) -> list[Batch]:
+        """Pitch rows in groups of ``size``, for :mod:`musicfit.batching`."""
+        def render(rows: torch.Tensor) -> tuple[torch.Tensor, int]:
+            x = synth.render_roll_dry(synth.params.values(), self.strengths()[rows], self.pitches[rows], self.frame_hop_s,
+                                      self.duration()[rows], n_samples)
+            return x, 0
+
+        return [partial(render, rows) for rows in torch.arange(len(self.pitches), device=self.logits.device).split(size)]
 
     @torch.no_grad()
     def decode(
@@ -151,6 +162,22 @@ class NoteSequence(nn.Module):
 
     def render(self, synth: Synth, n_samples: int) -> torch.Tensor:
         return synth.render_notes(self.pitch(), self.onset, self.duration(), self.velocity(), n_samples, self.glide())
+
+    def batches(self, synth: Synth, n_samples: int, size: int) -> list[Batch]:
+        """Notes in groups of ``size`` close together in time, each rendered only where it sounds."""
+        def render(notes: torch.Tensor) -> tuple[torch.Tensor, int]:
+            glide = self.glide()
+            return synth.render_notes_window(self.pitch()[notes], self.onset[notes], self.duration()[notes],
+                                             self.velocity()[notes], n_samples, None if glide is None else glide[notes])
+
+        if not len(self):
+            return []
+        return [partial(render, notes) for notes in torch.argsort(self.onset.detach()).split(size)]
+
+    @torch.no_grad()
+    def render_windowed(self, synth: Synth, n_samples: int, batch: int = 16) -> torch.Tensor:
+        """The same sound as render(), without gradients, in far less memory and time."""
+        return synth.render_notes_windowed(self.pitch(), self.onset, self.duration(), self.velocity(), n_samples, self.glide(), batch)
 
     @torch.no_grad()
     def to_notes(self, min_velocity: float = 0.0) -> list[Note]:

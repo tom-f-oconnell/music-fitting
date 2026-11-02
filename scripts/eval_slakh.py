@@ -31,7 +31,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch  # noqa: E402
-from eval_synthetic import compare_f1, run_targets, save_results, summarize  # noqa: E402
+from eval_synthetic import (  # noqa: E402
+    compare_f1,
+    parse_overrides,
+    peak_memory_gb,
+    reset_peak_memory,
+    run_targets,
+    save_results,
+    summarize,
+)
 
 from musicfit.fit import FitConfig, match_notes, note_metrics  # noqa: E402
 from musicfit.slakh import Clip, make_clips  # noqa: E402
@@ -52,6 +60,7 @@ def fit_clip(args) -> dict:
     torch.set_num_threads(threads)
     cfg = FitConfig(seed=clip.clip_id, **overrides)
     t0 = time.time()
+    reset_peak_memory()
     if method == "basic-pitch":
         notes = roll_notes = transcribe_only(clip, cfg, use_demucs)
         loss, patches = float("nan"), []
@@ -72,6 +81,7 @@ def fit_clip(args) -> dict:
         "track": clip.track,
         "start": clip.start,
         "time_s": round(time.time() - t0, 1),
+        "peak_gb": peak_memory_gb(),
         "final_loss": loss,
         **note_metrics(notes, clip.ref),
         "roll_metrics": note_metrics(roll_notes, clip.ref),
@@ -100,7 +110,7 @@ def main():
     ap.add_argument("--compare", help="earlier --out file to compare F1 against, paired by clip")
     args = ap.parse_args()
 
-    overrides = {k: json.loads(v) for k, v in (s.split("=", 1) for s in args.set)}
+    overrides = parse_overrides(args.set)
     overrides.setdefault("n_voices", 2)
     cfg = FitConfig(**overrides)
     clips = make_clips(args.data, args.source, args.length, args.clips_per_track,

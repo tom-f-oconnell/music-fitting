@@ -119,8 +119,8 @@ def make_clips(
     source: str = "mix",
     length: float = 4.0,
     clips_per_track: int = 1,
-    min_notes: int = 4,
-    max_notes: int = 60,
+    min_notes: int | None = None,
+    max_notes: int | None = None,
     pitch_range: tuple[int, int] = (36, 84),
     sr: int = 16000,
 ) -> list[Clip]:
@@ -134,8 +134,8 @@ def make_clips(
         source: see :func:`source_stems`.
         length: window length in seconds.
         clips_per_track: windows to take from each track.
-        min_notes: skip windows with fewer true notes of the source than this.
-        max_notes: skip windows with more true notes of the source than this.
+        min_notes: skip windows with fewer true notes of the source than this; default 1 per second.
+        max_notes: skip windows with more true notes of the source than this; default 15 per second.
         pitch_range: lowest and highest MIDI pitch the fit can find; notes outside it are not
             counted as missed.
         sr: expected sample rate.
@@ -143,6 +143,8 @@ def make_clips(
     Returns:
         Clips, with audio normalised to a peak of 0.5 (as ``scripts/fit_audio.py`` does).
     """
+    min_notes = int(length) if min_notes is None else min_notes
+    max_notes = int(15 * length) if max_notes is None else max_notes
     clips = []
     for track_dir in sorted(glob.glob(os.path.join(root, "Track*"))):
         track = os.path.basename(track_dir)

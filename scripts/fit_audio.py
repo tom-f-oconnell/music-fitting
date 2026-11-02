@@ -43,6 +43,8 @@ def main():
     ap.add_argument("--separate", action="store_true",
                     help="split off the drums with Demucs first, and fit notes and drums each to their own stem")
     ap.add_argument("--basic-pitch", action="store_true", help="start from a basic-pitch transcription, skipping stage 1")
+    ap.add_argument("--memory-mode", default="batched", choices=("batched", "full"),
+                    help="full: the older way of rendering everything at once, which needs far more memory")
     ap.add_argument("--device", default="auto", help="auto (CUDA if available), cpu, cuda, ...")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -51,7 +53,7 @@ def main():
     target = target / (target.abs().max() + 1e-8) * 0.5
     cfg = FitConfig(sr=args.sr, n_voices=args.voices, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
                     roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed,
-                    drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device,
+                    drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device, memory_mode=args.memory_mode,
                     **(lead_settings() if args.lead else {}))
     if args.separate or args.basic_pitch:
         from musicfit.tools import fit_with_tools

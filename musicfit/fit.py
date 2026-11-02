@@ -13,6 +13,7 @@ loss by at least ``prune_tol`` to stay) and the survivors are refined briefly.
 
 from __future__ import annotations
 
+import gc
 import math
 import time
 from dataclasses import dataclass, field, replace
@@ -20,6 +21,7 @@ from typing import Callable
 
 import torch
 
+from .batching import backward_in_batches, render_mix
 from .drums import NoiseVoice
 from .loss import MultiResolutionSTFTLoss
 from .notes import Note, NoteSequence, PianoRoll
@@ -62,12 +64,19 @@ class FitConfig:
     note_sparsity: float = 3.0  # L1 weight on note velocities (sum / n_frames, like the stage-1 penalty)
     prune_velocity: float = 0.05
     prune_tol: float = 0.01  # leave-one-out pruning: drop notes whose removal raises the loss by < this (0: off)
+    prune_reference_s: float = 15.0  # scale prune_tol down for clips longer than this (0: never), see _prune_tolerance
     polish_steps: int = 100  # refinement steps after leave-one-out pruning
     fft_sizes: tuple = (2048, 1024, 512, 256, 128)
     lr_decay: float = 0.1  # final/initial learning-rate ratio (linear decay within each stage)
     log_every: int = 50
     seed: int = 0
     device: str = "auto"  # "auto" (CUDA if available), "cpu", "cuda", "cuda:1", ...
+    # "batched": render a few notes or pitch rows at a time, and notes only where they sound, which takes
+    # a fraction of the memory for the same gradients (design.md); "full": render everything at once
+    memory_mode: str = "batched"
+    roll_batch: int = 0  # pitch rows per batch in stage 1; 0: by clip length, to hold memory steady
+    note_batch: int = 16  # notes per batch in stage 2, once a clip is too long to render its notes in one
+    sin_cache_gb: float = 2.0  # sinusoid tables kept between steps of stage 1, which saves recomputing them
 
 
 @dataclass
@@ -102,6 +111,31 @@ def _initial_patch(voice: int) -> SynthParams:
 def stage2_steps(cfg: FitConfig) -> int:
     """Optimiser steps in stage 2, including the refinement after pruning."""
     return cfg.note_steps + (cfg.polish_steps + 1 if cfg.prune_tol > 0 else 0)
+
+
+# What fits in about 3 GB on the GPU. Short clips stay in one batch, which is ordinary backprop: on a GPU,
+# many small batches cost far more time than their size suggests (at 4 s, 8 rows at a time takes 3.5 times as long).
+ROW_SECONDS_PER_BATCH = 200
+NOTE_SECONDS_PER_BATCH = 200
+
+
+def _roll_batch(cfg: FitConfig, n_samples: int) -> int:
+    rows = cfg.pitch_max - cfg.pitch_min + 1
+    return min(rows, cfg.roll_batch or max(1, int(ROW_SECONDS_PER_BATCH * cfg.sr / n_samples)))
+
+
+def _note_batch(cfg: FitConfig, n_notes: int, n_samples: int) -> int:
+    return max(n_notes, 1) if n_notes * n_samples / cfg.sr <= NOTE_SECONDS_PER_BATCH else cfg.note_batch
+
+
+def _prune_tolerance(cfg: FitConfig, n_samples: int) -> float:
+    """How much removing a note must raise the loss for the note to stay.
+
+    The loss is an average over the clip, so beyond prune_reference_s a note isn't held to a higher bar
+    just because it is a smaller part of the whole (design.md).
+    """
+    seconds = n_samples / cfg.sr
+    return cfg.prune_tol * min(1.0, cfg.prune_reference_s / seconds) if cfg.prune_reference_s else cfg.prune_tol
 
 
 def _noise_groups(noise: NoiseVoice | None, roll_lr: float, param_lr: float) -> list[dict]:
@@ -172,6 +206,35 @@ def _prune_redundant(notes: list[Note], synths: list[Synth], target: torch.Tenso
     return [n for n, k in zip(notes, keep) if k]
 
 
+@torch.no_grad()
+def _prune_by_subtraction(notes: list[Note], synths: list[Synth], target: torch.Tensor, loss_fn, tol: float,
+                          background: torch.Tensor | None = None) -> list[Note]:
+    """As _prune_redundant, rendering each note once and trying the mix without it, not every note every time."""
+    T, dev = target.shape[-1], target.device
+    extra = 0.0 if background is None else background
+    mixes = [torch.zeros(T, device=dev) for _ in synths]
+    parts = []
+    for n in notes:
+        y, start = synths[n.voice].render_notes_window(
+            *(torch.tensor([getattr(n, a)], device=dev) for a in ("pitch", "onset", "duration", "velocity")), T,
+            torch.tensor([n.glide], device=dev) if n.glide else None)
+        mixes[n.voice][start:start + y.numel()] += y
+        parts.append((y, start))
+    wet = [s.effects(s.params.values(), m) for s, m in zip(synths, mixes)]
+    base = float(loss_fn(sum(wet) + extra, target))
+    keep = [True] * len(notes)
+    for i in sorted(range(len(notes)), key=lambda i: notes[i].velocity):
+        v = notes[i].voice
+        y, start = parts[i]
+        mix = mixes[v].clone()
+        mix[start:start + y.numel()] -= y
+        trial = synths[v].effects(synths[v].params.values(), mix)
+        loss = float(loss_fn(sum(trial if j == v else w for j, w in enumerate(wet)) + extra, target))
+        if loss - base < tol:
+            base, keep[i], mixes[v], wet[v] = loss, False, mix, trial
+    return [n for n, k in zip(notes, keep) if k]
+
+
 def fit(
     target: torch.Tensor,
     config: FitConfig | None = None,
@@ -225,6 +288,56 @@ def fit(
     spread = 0.0
     spread_steps = {cfg.roll_steps // 4, cfg.roll_steps // 2, 3 * cfg.roll_steps // 4}
 
+    batched = cfg.memory_mode == "batched"
+    if not batched and cfg.memory_mode != "full":
+        raise ValueError(f"memory_mode must be batched or full, not {cfg.memory_mode}")
+    batch_size = {"roll": _roll_batch(cfg, T)}  # the notes' size is worked out from the notes, until memory runs out
+    if batched:
+        for s in synths:
+            s.sin_cache_limit = cfg.sin_cache_gb * 1e9
+
+    def evaluate(models, kind, render_extra, objective, opt=None) -> float:
+        """The value of objective(pred) -> (loss to minimise, spectral loss), and with opt its gradients."""
+        if not batched:
+            loss, spec = objective(sum(m.render(s, T) for m, s in zip(models, synths)) + render_extra())
+            if opt is not None:
+                opt.zero_grad()
+                loss.backward()
+            return spec.item()
+
+        spectral = []
+
+        def loss_of_mixes(mixes):
+            pred = sum(s.effects(s.params.values(), mix) for s, mix in zip(synths, mixes)) + render_extra()
+            loss, spec = objective(pred)
+            spectral.append(spec.item())
+            return loss
+
+        while True:
+            spectral.clear()
+            try:
+                voices = [m.batches(s, T, batch_size.get(kind) or _note_batch(cfg, len(m), T)) for m, s in zip(models, synths)]
+                if opt is None:
+                    with torch.no_grad():
+                        loss_of_mixes([render_mix(b, T, device) for b in voices])
+                else:
+                    opt.zero_grad()
+                    backward_in_batches(voices, T, device, loss_of_mixes)
+                return spectral[-1]
+            except torch.cuda.OutOfMemoryError:
+                current = batch_size.get(kind) or max(_note_batch(cfg, len(m), T) for m in models)
+                if current == 1:
+                    raise
+            # outside the handler, so that the failed attempt's tensors are gone
+            batch_size[kind] = current // 2
+            for s in synths:
+                s._sin_cache.clear()
+                s.sin_cache_limit /= 2
+            gc.collect()
+            torch.cuda.empty_cache()
+            if verbose:
+                print(f"out of GPU memory: now rendering {batch_size[kind]} at a time in {kind}", flush=True)
+
     # ---- stage 1: soft piano roll -------------------------------------------
     if init_notes is None:
         opt = torch.optim.Adam(
@@ -235,27 +348,35 @@ def fit(
         sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
         for step in range(cfg.roll_steps + 1):
             drums_on = noise is not None and step >= cfg.drum_start * cfg.roll_steps
-            pred = sum(r.render(s, T) for r, s in zip(rolls, synths)) + (render_noise() if drums_on else 0.0)
-            if cfg.spread_grid and step in spread_steps:
-                spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
-            spec = loss_fn(pred, target, spread)
-            sparse = sum((r.strengths().sum(0).mean() for r in rolls), torch.zeros((), device=device))  # mass per frame
             ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
-            loss = spec + ramp * cfg.sparsity * sparse
-            if drums_on:
-                drum_mass = noise_mass()
-                sparse = sparse + drum_mass
-                loss = loss + ramp * cfg.sparsity * drum_mass
-            report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec.item()})
+            mass = []
+
+            def objective(pred):
+                nonlocal spread
+                if cfg.spread_grid and step in spread_steps:
+                    spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
+                spec = loss_fn(pred, target, spread)
+                sparse = sum((r.strengths().sum(0).mean() for r in rolls), torch.zeros((), device=device))  # mass per frame
+                loss = spec + ramp * cfg.sparsity * sparse
+                if drums_on:
+                    drum_mass = noise_mass()
+                    sparse = sparse + drum_mass
+                    loss = loss + ramp * cfg.sparsity * drum_mass
+                mass.append(sparse.item())
+                return loss, spec
+
+            spec = evaluate(rolls, "roll", render_noise if drums_on else (lambda: 0.0), objective,
+                            opt if step < cfg.roll_steps else None)
+            report({"stage": "roll", "step": step, "total": cfg.roll_steps, "loss": spec})
             if step % cfg.log_every == 0 or step == cfg.roll_steps:
-                _log(history, "roll", step, spec.item(), {"mass_per_frame": sparse.item()}, t0, verbose)
+                _log(history, "roll", step, spec, {"mass_per_frame": mass[-1]}, t0, verbose)
             if step == cfg.roll_steps:
                 break
-            opt.zero_grad()
-            loss.backward()
             opt.step()
             sched.step()
 
+        for s in synths:
+            s._sin_cache.clear()
         roll_notes = [n for v, r in enumerate(rolls) for n in r.decode(cfg.decode_threshold, voice=v)]
         if verbose:
             print(f"decoded {len(roll_notes)} notes from the piano roll", flush=True)
@@ -286,23 +407,26 @@ def fit(
         sched = _linear_decay(opt, n_steps, cfg.lr_decay)
         for i in range(n_steps + 1):
             step = first_step + i
-            pred = sum(q.render(s, T) for q, s in zip(seqs, synths)) + render_noise()
-            if cfg.spread_grid and i == 0:
-                spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
-            loss = loss_fn(pred, target, spread)
+
+            def objective(pred):
+                nonlocal spread
+                if cfg.spread_grid and i == 0:
+                    spread = loss_fn.best_spread(pred.detach(), target, cfg.spread_grid)
+                spec = loss_fn(pred, target, spread)
+                loss = spec
+                if cfg.note_sparsity:
+                    loss = loss + cfg.note_sparsity * sum(q.velocity().sum() for q in seqs) / n_frames
+                return loss + cfg.sparsity * noise_mass(), spec
+
+            spec = evaluate(seqs, "notes", render_noise, objective, opt if i < n_steps else None)
             # the warm-up with frozen notes stands in for stage 1, on the progress chart too
             report({"stage": "roll" if notes_frozen else "notes", "step": step, "total": n_steps if notes_frozen else total,
-                    "loss": loss.item()})
+                    "loss": spec})
             if step % cfg.log_every == 0 or i == n_steps:
-                _log(history, "roll" if notes_frozen else "notes", step, loss.item(),
+                _log(history, "roll" if notes_frozen else "notes", step, spec,
                      {"n_notes": sum(len(q) for q in seqs)}, t0, verbose)
             if i == n_steps:
                 break
-            if cfg.note_sparsity:
-                loss = loss + cfg.note_sparsity * sum(q.velocity().sum() for q in seqs) / n_frames
-            loss = loss + cfg.sparsity * noise_mass()
-            opt.zero_grad()
-            loss.backward()
             opt.step()
             sched.step()
 
@@ -313,7 +437,8 @@ def fit(
     if cfg.prune_tol > 0:
         with torch.no_grad():
             background = render_noise() if noise is not None else None
-        notes = _prune_redundant(notes, synths, target, lambda a, b: loss_fn(a, b, spread), cfg.prune_tol, background)
+        prune = _prune_by_subtraction if batched else _prune_redundant
+        notes = prune(notes, synths, target, lambda a, b: loss_fn(a, b, spread), _prune_tolerance(cfg, T), background)
         if verbose:
             print(f"{len(notes)} notes left after leave-one-out pruning", flush=True)
         seqs = [make_seq([n for n in notes if n.voice == v]) for v in range(cfg.n_voices)]
@@ -324,7 +449,9 @@ def fit(
     @torch.no_grad()
     def render_final():
         final_seqs = [make_seq([n for n in notes if n.voice == v]) for v in range(cfg.n_voices)]
-        audio = sum(q.render(s, T) for q, s in zip(final_seqs, synths)) + render_noise()
+        # after running out of memory, the batches stay small
+        render_one = (lambda q, s: q.render_windowed(s, T, batch_size.get("notes", 16))) if batched else (lambda q, s: q.render(s, T))
+        audio = sum(render_one(q, s) for q, s in zip(final_seqs, synths)) + render_noise()
         return audio, float(loss_fn(audio, target))
 
     audio, final_loss = render_final()

@@ -46,6 +46,27 @@ from musicfit.notes import Note  # noqa: E402
 from musicfit.synthetic import acid_target, synthetic_target  # noqa: E402
 
 
+def parse_overrides(items: list[str]) -> dict:
+    """FIELD=VALUE strings as a dict; values are JSON, or plain strings if they aren't."""
+    out = {}
+    for item in items:
+        key, value = item.split("=", 1)
+        try:
+            out[key] = json.loads(value)
+        except json.JSONDecodeError:
+            out[key] = value
+    return out
+
+
+def reset_peak_memory() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+def peak_memory_gb() -> float:
+    return round(torch.cuda.max_memory_allocated() / 1e9, 2) if torch.cuda.is_available() else 0.0
+
+
 def fit_target(args) -> dict:
     seed, overrides, mismatch, length, n_notes, threads, kind, use_basic_pitch = args
     torch.set_num_threads(threads)
@@ -55,6 +76,7 @@ def fit_target(args) -> dict:
     else:
         target, ref, true_patch = synthetic_target(seed, length, n_notes, cfg.sr, mismatch)
     t0 = time.time()
+    reset_peak_memory()
     if use_basic_pitch:
         from musicfit.tools import fit_with_tools
 
@@ -64,6 +86,7 @@ def fit_target(args) -> dict:
     return {
         "seed": seed,
         "time_s": round(time.time() - t0, 1),
+        "peak_gb": peak_memory_gb(),
         "final_loss": res.history[-1]["loss"],
         "spread_searched": res.history[-1].get("spread_searched", 0.0),
         "spread_kept": res.spread_cents,
@@ -158,7 +181,8 @@ def summarize(rows: list[dict]) -> dict:
     mean["roll_f1"] = statistics.mean(r["roll_metrics"]["f1"] for r in rows)
     print(f"\nmean over {len(rows)} targets: P {mean['precision']:.3f} R {mean['recall']:.3f} F1 {mean['f1']:.3f} "
           f"(stage 1 F1 {mean['roll_f1']:.3f}), loss {mean['final_loss']:.3f}; "
-          f"{sum(r['n_pred'] for r in rows)} notes predicted, {sum(r['n_ref'] for r in rows)} real")
+          f"{sum(r['n_pred'] for r in rows)} notes predicted, {sum(r['n_ref'] for r in rows)} real; "
+          f"{statistics.mean(r['time_s'] for r in rows):.0f} s per fit, peak GPU {max(r.get('peak_gb', 0) for r in rows):.1f} GB")
     return mean
 
 
@@ -201,7 +225,7 @@ def main():
 
     lo, _, hi = args.seeds.partition("-")
     seeds = range(int(lo), int(hi or lo) + 1)
-    overrides = {k: json.loads(v) for k, v in (s.split("=", 1) for s in args.set)}
+    overrides = parse_overrides(args.set)
     mismatch = {k: float(v) for k, v in (s.split("=", 1) for s in args.mismatch)}
     on_gpu = torch.cuda.is_available() and overrides.get("device", "auto") != "cpu"
     jobs = args.jobs or (5 if on_gpu else 1)
