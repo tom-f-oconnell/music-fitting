@@ -29,7 +29,7 @@ from .render import notes_from_dicts, render, spectral_loss, wav_bytes
 from .request_log import RequestLog, timestamp_server_logs
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
-MAX_DURATION_S = 15.0
+MAX_DURATION_S = 120.0
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 # Slider groups and display units for the frontend.
@@ -187,6 +187,7 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
         pitch_max: int = Form(84),
         seed: int = Form(0),
         lead: bool = Form(False),
+        full_memory: bool = Form(False),
         separate: bool = Form(False),
         basic_pitch: bool = Form(False),
     ):
@@ -199,7 +200,7 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
             raise HTTPException(422, "that tool is not installed; see requirements-tools.txt")
         cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
                    note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
-                   seed=seed, lead=lead, separate=separate, basic_pitch=basic_pitch)
+                   seed=seed, lead=lead, full_memory=full_memory, separate=separate, basic_pitch=basic_pitch)
         if track:
             return jobs.submit_library(library.title(track), library.resolve(track), cfg).public()
         if file is None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import threading
@@ -105,18 +106,18 @@ class JobManager:
     def submit_upload(self, name: str, src_path: str, cfg: dict) -> Job:
         job = self._new(name, "upload", cfg)
         os.replace(src_path, os.path.join(self.dir(job.id), "upload" + os.path.splitext(name)[1]))
-        self._pool.submit(self._run, job)
+        self._pool.submit(self._run_and_release, job)
         return job
 
     def submit_library(self, name: str, path: str, cfg: dict) -> Job:
         """Fit a cached file, which stays where it is."""
         job = self._new(name, "library", {**cfg, "source_path": path})
-        self._pool.submit(self._run, job)
+        self._pool.submit(self._run_and_release, job)
         return job
 
     def submit_demo(self, cfg: dict) -> Job:
         job = self._new(f"synthetic demo (seed {cfg.get('seed', 1)})", "demo", cfg)
-        self._pool.submit(self._run, job)
+        self._pool.submit(self._run_and_release, job)
         return job
 
     def cancel(self, job_id: str) -> None:
@@ -143,8 +144,16 @@ class JobManager:
             pitch_min=int(c.get("pitch_min", 36)), pitch_max=int(c.get("pitch_max", 84)),
             roll_steps=int(c.get("roll_steps", 400)), note_steps=int(c.get("note_steps", 300)),
             sparsity=float(c.get("sparsity", 0.5)), seed=int(c.get("seed", 0)),
+            memory_mode="full" if c.get("full_memory") else "batched",
             **(lead_settings() if c.get("lead") else {}),
         )
+
+    def _run_and_release(self, job: Job) -> None:
+        self._run(job)
+        # everything the fit used is gone by now: an idle server shouldn't sit on a shared GPU's memory
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _run(self, job: Job) -> None:
         if job.status == "cancelled":

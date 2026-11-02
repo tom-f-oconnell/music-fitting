@@ -42,7 +42,7 @@ def render(patches: list[dict], notes: list[Note], n_samples: int, sr: int = 160
         if not vn:
             continue
         glide = torch.tensor([n.glide for n in vn]) if any(n.glide for n in vn) else None
-        out = out + synth.render_notes(
+        out = out + synth.render_notes_windowed(
             torch.tensor([n.pitch for n in vn]), torch.tensor([n.onset for n in vn]),
             torch.tensor([n.duration for n in vn]), torch.tensor([n.velocity for n in vn]), n_samples, glide)
     return out

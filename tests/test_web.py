@@ -76,6 +76,35 @@ def test_demo_job_render_and_exports(client):
     assert midi.status_code == 200 and midi.content[:4] == b"MThd"
 
 
+def test_the_older_way_of_fitting_is_an_option(client):
+    sr = 16000
+    x = 0.3 * np.sin(2 * np.pi * 220 * np.arange(int(0.5 * sr)) / sr)
+    buf = io.BytesIO()
+    sf.write(buf, x, sr, format="WAV")
+    for form, mode in (({}, "batched"), ({"full_memory": "on"}, "full")):
+        job = client.post("/api/jobs", files={"file": ("tone.wav", buf.getvalue(), "audio/wav")},
+                          data={"duration": "0.5", "roll_steps": "4", "note_steps": "2", "pitch_min": "50", "pitch_max": "62", **form}).json()
+        job = _wait(client, job["id"])
+        assert job["status"] == "done", job["error"]
+        assert client.app.state.jobs._fit_config(job["config"]).memory_mode == mode
+
+
+def test_gpu_memory_is_released_after_a_job(client, monkeypatch):
+    released = []
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.empty_cache", lambda: released.append(True))
+    manager = client.app.state.jobs
+    monkeypatch.setattr(manager, "_run", lambda job: None)
+    manager._run_and_release(manager._new("x", "demo", {}))
+    assert released
+
+
+def test_clips_can_be_longer_than_they_used_to(client):
+    too_long = client.post("/api/jobs", files={"file": ("x.wav", b"x", "audio/wav")}, data={"duration": "121"})
+    assert too_long.status_code == 422 and "120" in too_long.json()["detail"]
+    assert client.get("/api/specs").json()["max_duration_s"] == 120
+
+
 def test_jobs_record_when_they_ran(client):
     before = time.time()
     job = client.post("/api/jobs/demo", json={"seed": 1, "length": 1.0, "notes": 2, "roll_steps": 4, "note_steps": 2}).json()
@@ -178,7 +207,7 @@ def test_upload_job_with_tools(client, monkeypatch):
 
 
 def test_rejects_bad_input(client):
-    bad = client.post("/api/jobs", files={"file": ("x.wav", b"not audio", "audio/wav")}, data={"duration": "60"})
+    bad = client.post("/api/jobs", files={"file": ("x.wav", b"not audio", "audio/wav")}, data={"duration": "600"})
     assert bad.status_code == 422
     job = client.post("/api/jobs", files={"file": ("x.wav", b"not audio", "audio/wav")}, data={"duration": "1"}).json()
     job = _wait(client, job["id"])

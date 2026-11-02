@@ -615,39 +615,84 @@ async function refreshLibrary() {
   if (active || $("#data-dialog").open) S.libraryTimer = setTimeout(refreshLibrary, active ? 1500 : 5000);
 }
 
-function showTracks() {
-  const key = JSON.stringify(S.library.datasets.map((d) => [d.name, d.tracks.map((t) => t.id)]));
-  if (key === S.tracksShown) return;  // rebuilding would close the list if it's open
-  S.tracksShown = key;
-  const select = $("#track"), current = select.value;
-  while (select.children.length > 1) select.lastChild.remove();
-  for (const d of S.library.datasets) {
-    if (!d.tracks.length) continue;
-    const group = document.createElement("optgroup");
-    group.label = d.name;
-    for (const t of d.tracks) {
-      const o = document.createElement("option");
-      o.value = t.id;
-      o.textContent = t.title;
-      group.appendChild(o);
-    }
-    select.appendChild(group);
-  }
-  if ([...select.options].some((o) => o.value === current)) select.value = current;
-  showChosenTrack(false);
+// Search that ignores case and accents; every word has to appear in the track's title or its dataset's name.
+const searchable = (text) => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+function formatLength(seconds) {
+  if (!seconds) return "";
+  const s = Math.round(seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function findTrack(id) {
-  // the same file can be an example and part of its dataset: the first has the suggested settings
-  for (const d of S.library ? S.library.datasets : []) {
-    const t = d.tracks.find((x) => x.id === id);
-    if (t) return t;
+function showTracks() {
+  const list = $("#track-list"), words = searchable($("#track-search").value).split(/\s+/).filter(Boolean);
+  const datasets = S.library ? S.library.datasets : [];
+  const key = JSON.stringify([words, S.chosenKey || "", datasets.map((d) => [d.id, d.name, d.tracks.map((t) => t.id)])]);
+  if (key === S.tracksShown) return;  // rebuilding would lose the scroll position for nothing
+  S.tracksShown = key;
+  const scroll = list.scrollTop;
+  list.innerHTML = "";
+  S.trackRows = [];
+
+  const addRow = (title, length, rowKey, track) => {
+    const row = document.createElement("div");
+    row.className = "track-row" + (rowKey === (S.chosenKey || "") ? " chosen" : "");
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", rowKey === (S.chosenKey || ""));
+    row.title = title;
+    row.innerHTML = '<span class="track-title"></span><span class="track-length"></span>';
+    row.querySelector(".track-title").textContent = title;
+    row.querySelector(".track-length").textContent = length;
+    row.onclick = () => chooseTrack(rowKey, track);
+    list.appendChild(row);
+    S.trackRows.push(row);
+  };
+
+  if (!words.length) addRow("Upload a file", "", "", null);
+  let shown = 0, total = 0;
+  for (const d of datasets) {
+    const name = searchable(d.name);
+    const matching = d.tracks.filter((t) => { const text = `${name} ${searchable(t.title)}`; return words.every((w) => text.includes(w)); });
+    total += d.tracks.length;
+    shown += matching.length;
+    if (!matching.length) continue;
+    const head = document.createElement("div");
+    head.className = "track-group";
+    head.textContent = `${d.name} (${matching.length}${matching.length === d.tracks.length ? "" : ` of ${d.tracks.length}`})`;
+    list.appendChild(head);
+    for (const t of matching) addRow(t.title, formatLength(t.duration_s), `${d.id}\n${t.id}`, t);
   }
-  return null;
+  if (!shown && words.length) {
+    const none = document.createElement("div");
+    none.className = "hint track-none";
+    none.textContent = "No tracks match.";
+    list.appendChild(none);
+  }
+  list.scrollTop = scroll;
+  $("#track-count").textContent = words.length ? `${shown} of ${total} tracks` : `${total} tracks`;
+  S.activeRow = -1;
+}
+
+// Choose a row of the list, or none (key "") to upload a file.
+function chooseTrack(key, track, fill = true) {
+  S.chosenKey = key;
+  S.chosenTrack = track;
+  $("#track").value = track ? track.id : "";
+  showTracks();
+  showChosenTrack(fill);
+}
+
+function moveActiveRow(by) {
+  const rows = S.trackRows;
+  if (!rows.length) return;
+  if (S.activeRow >= 0 && rows[S.activeRow]) rows[S.activeRow].classList.remove("active");
+  S.activeRow = Math.min(Math.max(S.activeRow + by, 0), rows.length - 1);
+  rows[S.activeRow].classList.add("active");
+  rows[S.activeRow].scrollIntoView({ block: "nearest" });
 }
 
 function showChosenTrack(fill) {
-  const form = $("#upload-form"), t = findTrack($("#track").value);
+  const form = $("#upload-form"), t = S.chosenTrack;
   $("#drop").hidden = !!t;
   $("#track-info").hidden = !t;
   $("#upload-btn").textContent = t ? "Fit" : "Upload and fit";
@@ -655,7 +700,7 @@ function showChosenTrack(fill) {
   const preview = $("#track-preview");
   if (preview.getAttribute("src") !== src) { if (src) preview.src = src; else preview.removeAttribute("src"); }
   if (!t) return;
-  $("#track-note").textContent = t.note + (t.duration_s ? ` ${Math.floor(t.duration_s / 60)}:${String(Math.round(t.duration_s % 60)).padStart(2, "0")} long.` : "");
+  $("#track-note").textContent = `${t.title}${t.duration_s ? `, ${formatLength(t.duration_s)} long` : ""}. ${t.note}`.trim();
   if (fill) {
     form.elements.offset.value = t.offset;
     form.elements.duration.value = t.length;
@@ -734,11 +779,12 @@ function showDataDialog() {
   for (const d of cached) {
     const label = L.sources.find((s) => s.id === d.source);
     const li = dataRow(datasets, d.name, `${d.tracks.length} ${d.tracks.length === 1 ? "track" : "tracks"}, ${formatSize(d.size_bytes)}${label ? `. From ${label.label.toLowerCase()}: ${d.query}` : ""}`);
-    actionButton(li, "Fit one", async () => {
-      $("#track").value = d.tracks[0].id;
-      showChosenTrack(true);
+    actionButton(li, "Show in list", async () => {
+      $("#track-search").value = d.name;
+      showTracks();
       $("#data-dialog").close();
-      $("#track").focus();
+      $("#track-list").scrollTop = 0;
+      $("#track-search").focus();
     });
     if (label && d.source !== "zenodo" && !busy.has(d.id)) {
       actionButton(li, "Get more", () => postJson("/api/library/downloads", { source: d.source, query: d.query, name: d.name, limit: d.limit || 25 }));
@@ -764,7 +810,21 @@ function wire() {
   $("#data-btn").onclick = openDataDialog;
   $("#more-data").onclick = openDataDialog;
   $("#data-close").onclick = () => $("#data-dialog").close();
-  $("#track").onchange = () => showChosenTrack(true);
+  $("#track-search").oninput = () => { $("#track-list").scrollTop = 0; showTracks(); };
+  $("#track-search").onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      moveActiveRow(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();  // choosing a track isn't submitting the form
+      const row = S.trackRows[S.activeRow >= 0 ? S.activeRow : 0];
+      if (row) row.click();
+    } else if (e.key === "Escape" && e.target.value) {
+      e.target.value = "";
+      e.stopPropagation();
+      showTracks();
+    }
+  };
   $("#dl-source").onchange = showSourceHelp;
   $("#download-form").onsubmit = async (e) => {
     e.preventDefault();

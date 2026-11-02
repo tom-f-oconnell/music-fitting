@@ -168,7 +168,8 @@ out.noAudio = { ...tap(), sound: document.querySelector("#kbd-sound").textConten
 window.AudioContext = realContext;
 out.body = tap();
 focusOn(document.querySelector("[name=duration]")); out.numberBox = tap();
-focusOn(document.querySelector("#track")); out.dropdown = tap();
+focusOn(document.querySelector("[name=quality]")); out.dropdown = tap();
+focusOn(document.querySelector("#track-search")); out.searchBox = tap(); document.activeElement.blur();
 focusOn(document.querySelector("#kbd-on")); out.checkbox = tap();
 focusOn(textBox);
 textBox.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));  // a headless page without window focus gets none
@@ -218,6 +219,11 @@ def test_a_text_box_keeps_the_keys_and_says_so(key_results):
 
 
 @needs_chrome
+def test_typing_in_the_track_search_doesnt_play(key_results):
+    assert key_results["searchBox"]["played"] == 0
+
+
+@needs_chrome
 def test_escape_leaves_a_text_box(key_results):
     r = key_results["afterEscape"]
     assert r["active"] == "BODY" and r["played"] == 1
@@ -244,3 +250,117 @@ def test_other_keys_and_the_off_switch_explain_themselves(key_results):
 @needs_chrome
 def test_browser_shortcuts_are_left_alone(key_results):
     assert key_results["ctrlPlayed"] == 0 and key_results["ctrlDefaultKept"]
+
+
+# ---- the track list: the real page and script, with the server's answers filled in
+
+LIBRARY = {
+    "root": "/data",
+    "datasets": [
+        {"id": "examples", "name": "Examples", "source": "", "query": "", "limit": None, "size_bytes": 0, "tracks": [
+            {"id": "examples/sparse_piano.flac", "title": "Sparse piano", "duration_s": None, "offset": 0.0, "length": 4.0, "voices": 1, "note": "Few notes."},
+            {"id": "aphex_twin/audio/Cornish_Acid.opus", "title": "Cornish Acid", "duration_s": None, "offset": 30.0, "length": 4.0, "voices": 2, "note": "Acid."},
+        ]},
+        {"id": "aphex_twin", "name": "Aphex Twin", "source": "aphex_twin", "query": "Aphex Twin", "limit": None, "size_bytes": 1000, "tracks": [
+            {"id": "aphex_twin/audio/Cornish_Acid.opus", "title": "Aphex Twin - Cornish Acid", "duration_s": 134.0, "offset": 0.0, "length": 4.0, "voices": 1, "note": ""},
+            {"id": "aphex_twin/audio/Xtal.opus", "title": "Aphex Twin - Xtal", "duration_s": 291.0, "offset": 0.0, "length": 4.0, "voices": 1, "note": ""},
+        ]},
+        {"id": "other", "name": "Björk search", "source": "search", "query": "x", "limit": 5, "size_bytes": 1000, "tracks": [
+            {"id": "other/audio/hyper.opus", "title": "Hyperballad", "duration_s": 322.0, "offset": 0.0, "length": 4.0, "voices": 1, "note": ""},
+        ]},
+    ],
+    "sources": [], "presets": [], "downloads": [], "can_use_youtube": False,
+}
+SPECS = {"params": {}, "groups": [], "waveforms": [], "waveform_help": {}, "max_duration_s": 120, "tools": {"demucs": False, "basic_pitch": False}}
+
+TRACKS_TEST = """
+const realFetch = window.fetch;
+window.fetch = async (url, opts) => {
+  const path = String(url).split("?")[0];
+  const reply = { "/api/specs": %(specs)s, "/api/jobs": [], "/api/library": %(library)s }[path];
+  if (reply !== undefined) return new Response(JSON.stringify(reply), { status: 200 });
+  return realFetch(url, opts);
+};
+"""
+TRACKS_RUN = """
+(async () => {
+  await new Promise((r) => setTimeout(r, 300));
+  const rows = () => [...document.querySelectorAll("#track-list .track-row")].map((r) => r.querySelector(".track-title").textContent);
+  const groups = () => [...document.querySelectorAll("#track-list .track-group")].map((g) => g.textContent);
+  const box = document.querySelector("#track-search");
+  const type = (text) => { box.value = text; box.dispatchEvent(new Event("input")); };
+  const key = (k) => box.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  const form = document.querySelector("#upload-form");
+  const out = { all: rows(), groups: groups(), count: document.querySelector("#track-count").textContent, kind: document.querySelector("#track").type };
+  type("xtal"); out.xtal = rows(); out.xtalCount = document.querySelector("#track-count").textContent;
+  type("APHEX cornish"); out.twoWords = rows(); out.twoWordsGroups = groups();
+  type("bjork"); out.accent = rows();
+  type("hyperbal"); out.part = rows();
+  type("zzz"); out.none = rows(); out.noneText = document.querySelector("#track-list").textContent;
+  type("");
+  [...document.querySelectorAll(".track-row")].find((r) => r.textContent === "Cornish Acid").click();
+  out.example = { track: document.querySelector("#track").value, offset: form.elements.offset.value, voices: form.elements.voices.value,
+                  dropHidden: document.querySelector("#drop").hidden, button: document.querySelector("#upload-btn").textContent,
+                  chosen: document.querySelectorAll(".track-row.chosen").length, note: document.querySelector("#track-note").textContent };
+  type("xtal"); key("ArrowDown"); key("Enter");
+  out.keyboard = { track: document.querySelector("#track").value, offset: form.elements.offset.value, duration: form.elements.duration.value, stillFiltered: rows() };
+  key("Escape"); out.cleared = rows().length;
+  [...document.querySelectorAll(".track-row")].find((r) => r.textContent.includes("Upload a file")).click();
+  out.upload = { track: document.querySelector("#track").value, dropHidden: document.querySelector("#drop").hidden, button: document.querySelector("#upload-btn").textContent };
+  await realFetch("/tracks", { method: "POST", body: JSON.stringify(out) });
+})().catch((e) => realFetch("/error", { method: "POST", body: String(e) + " " + e.stack }));
+"""
+
+
+@pytest.fixture(scope="module")
+def track_results(tmp_path_factory):
+    static = os.path.dirname(KEYBOARD_JS)
+    with open(os.path.join(static, "index.html")) as f:
+        html = f.read()
+    with open(KEYBOARD_JS) as f:
+        keyboard = f.read()
+    with open(os.path.join(static, "app.js")) as f:
+        app = f.read()
+    setup = TRACKS_TEST % {"specs": json.dumps(SPECS), "library": json.dumps(LIBRARY)}
+    html = html.replace('<script src="keyboard.js"></script>', f"<script>{setup}</script><script>{keyboard}</script>")
+    html = html.replace('<script src="app.js"></script>', f"<script>{app}</script><script>{TRACKS_RUN}</script>")
+    return json.loads(_run_page_in_chrome(html, 1, tmp_path_factory.mktemp("chrome"))["/tracks"])
+
+
+@needs_chrome
+def test_the_list_shows_every_cached_track_by_dataset(track_results):
+    r = track_results
+    assert r["all"] == ["Upload a file", "Sparse piano", "Cornish Acid", "Aphex Twin - Cornish Acid", "Aphex Twin - Xtal", "Hyperballad"]
+    assert r["groups"] == ["Examples (2)", "Aphex Twin (2)", "Björk search (1)"]
+    assert r["count"] == "5 tracks"
+    assert r["kind"] == "hidden"
+
+
+@needs_chrome
+def test_searching_narrows_the_list(track_results):
+    r = track_results
+    assert r["xtal"] == ["Aphex Twin - Xtal"] and r["xtalCount"] == "1 of 5 tracks"
+    assert r["twoWords"] == ["Aphex Twin - Cornish Acid"] and r["twoWordsGroups"] == ["Aphex Twin (1 of 2)"]
+    assert r["accent"] == ["Hyperballad"]  # by dataset name, ignoring the accent
+    assert r["part"] == ["Hyperballad"]
+    assert r["none"] == [] and "No tracks match" in r["noneText"]
+
+
+@needs_chrome
+def test_choosing_an_example_fills_in_its_settings(track_results):
+    e = track_results["example"]
+    assert e["track"] == "aphex_twin/audio/Cornish_Acid.opus" and e["offset"] == "30" and e["voices"] == "2"
+    assert e["dropHidden"] and e["button"] == "Fit" and e["chosen"] == 1 and "Acid." in e["note"]
+
+
+@needs_chrome
+def test_the_search_box_works_from_the_keyboard(track_results):
+    k = track_results["keyboard"]
+    assert k["track"] == "aphex_twin/audio/Xtal.opus" and k["offset"] == "0" and k["stillFiltered"] == ["Aphex Twin - Xtal"]
+    assert track_results["cleared"] == 6
+
+
+@needs_chrome
+def test_upload_is_still_there(track_results):
+    u = track_results["upload"]
+    assert u["track"] == "" and not u["dropHidden"] and u["button"] == "Upload and fit"
