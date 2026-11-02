@@ -21,7 +21,7 @@ Then open http://localhost:43153.
 
 * **Fit a clip:** under *Audio*, pick an example or a track you've downloaded, or
   upload a file (anything ffmpeg can read). Choose where the clip starts and how
-  long it is (up to 15 s), how many voices (synth patches) to fit, and a preset
+  long it is (up to 2 minutes), how many voices (synth patches) to fit, and a preset
   (Standard, or Quick, which leaves slightly more spurious notes). Or click **Run
   demo fit** to fit a random synthetic melody whose true notes and patch are shown
   for comparison.
@@ -83,8 +83,9 @@ fit, default 3; 0 for none), `--noise-floor`, `--seed`, `--device` (`auto`,
 notes, with 128 harmonics). With the optional helpers: `--basic-pitch` starts
 from a transcription instead of finding notes itself, and keeps all its notes,
 and `--separate` splits off the drums with Demucs and fits notes and drums each
-to their own stem. The recording's tuning offset from A440 is estimated
-automatically.
+to their own stem. `--memory-mode full` uses the older way of fitting, which renders
+everything at once and needs far more memory (about 8 GB of GPU memory at 8 s). The
+recording's tuning offset from A440 is estimated automatically.
 `eval_synthetic.py` fits many synthetic targets (in parallel on a GPU, ~5 min
 for 24) with any `FitConfig` overrides (`--set field=value`), optionally with
 things real recordings have and the synth can't make (`--mismatch
@@ -109,7 +110,8 @@ the terminal shows the same for all requests; behind an SSH tunnel the address i
 HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
 `POST /api/jobs` (multipart: `file` or `track`, `offset`, `duration`, `voices`,
 `roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,
-`separate`, `basic_pitch`; the last two only if `tools` in `/api/specs` says they are installed),
+`full_memory`, `separate`, `basic_pitch`; the last two only if `tools` in `/api/specs` says they are
+installed),
 `POST /api/jobs/demo`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `GET /api/library` (cached tracks and downloads), `GET /api/library/audio?track=`,
 `POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
@@ -146,11 +148,12 @@ musicfit/
   loss.py         multi-resolution STFT loss, expected spectrum of a detuned unison
   tuning.py       the recording's offset from A440
   fit.py          two-stage joint fitting procedure
+  batching.py     low-memory gradients, a few notes at a time
   tools.py        optional Demucs and basic-pitch, and fitting with them
   audio_io.py     ffmpeg-based loading, wav saving
   synthetic.py    synthetic targets with known notes: random melodies, 303-style lines
   slakh.py        BabySlakh clips with their true notes
-  web/            FastAPI app (app.py), background jobs and downloads (jobs.py, downloads.py), fast re-render (render.py), static/ UI (keyboard.js: the live synth)
+  web/            FastAPI app (app.py), background jobs and downloads (jobs.py, downloads.py), fast re-render (render.py), request log (request_log.py), static/ UI (keyboard.js: the live synth)
   dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py), cached data and Zenodo (library.py), example clips
 scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, eval_slakh.py, build_aphex_twin_dataset.py, make_examples.py
 tests/

@@ -31,8 +31,8 @@ Nyquist are rendered at all, so many harmonics cost little except on low notes.
 
 Speed, forward + backward of one step: a 3 s clip at 16 kHz takes ~0.3–0.4 s
 on 48 CPU cores and ~0.02 s on an RTX 3090; a 10 s clip 1–4 s vs. 0.05–0.08 s
-with 8.6 GiB peak GPU memory. Memory grows with clip length × (pitches or
-notes) × harmonics.
+with 8.6 GiB peak GPU memory when everything is rendered at once. See "Memory and
+long clips" for what fits do instead.
 
 ## Note representations (`notes.py`)
 
@@ -82,6 +82,76 @@ notes and 2 of 74 real ones (8 targets, before pruning existed).
 `fit()` runs on `FitConfig.device` (`"auto"`: CUDA if available). Given
 `init_notes` it skips stage 1: the patch and drums are fitted to those notes
 for `roll_steps // 4` steps with the notes frozen, then stage 2 starts from them.
+
+## Memory and long clips
+
+Rendering everything at once (`memory_mode="full"`, the old way, still available) keeps
+autograd's copy of every harmonic of every note over the whole clip. In stage 2 notes and
+samples both grow with the clip, so memory grows with its square: 7.5–9 GB at 8 s and about
+27 GB of RAM at 15 s. Fits now default to `memory_mode="batched"`:
+
+* **Two passes** (`batching.py`). The dry audio is a sum over notes or pitch rows, and the
+  effects and loss only see that sum, so d loss / d θ is the sum over batches of
+  ⟨d loss / d mix, d batch / d θ⟩. Render without gradients, backpropagate only as far as the
+  mix, then render each batch again with gradients, weighted by that, and free it.
+* **Windows** (`render_notes_window`). A batch of notes close in time is rendered only from
+  its first onset to 14 release time constants (−122 dB) after its last note-off, on the
+  control-rate grid so the filter's interpolation doesn't change.
+* **Pruning by subtraction.** Each note is rendered once and taken out of the mix to try
+  without it, rather than re-rendering every note for every candidate.
+* **Batch sizes from a budget.** On a GPU many small batches cost far more time than their
+  size suggests: at 4 s, 8 rows at a time took 196 ms a step against 56 ms for ordinary
+  backprop. So a clip that fits stays in one batch, which is ordinary backprop, and longer
+  ones split only as far as they must: rows × seconds ≤ 200 in stage 1, and 16 notes a
+  batch beyond 200 note-seconds in stage 2. Running out of memory halves the batches and
+  carries on. The web server also releases GPU memory after each job.
+
+**The gradients are the same.** In a 64-bit copy of the synth, batched stage 1 gradients
+match ordinary ones to 2e-10, and stage 2 reaches a cosine of at least 0.9998 (on one step of
+one 3 s clip). The real code is 32-bit, where rounding near silence matters more than
+batching does: full and batched are each at a cosine of about 0.96 from the 64-bit
+gradient.
+
+**Fit quality is the same.** Paired by target, on seeds not used for choosing settings, with
+the old way against itself for scale (+0.013 ± 0.014):
+
+| test | F1, full → batched | Δ F1 | loss, full → batched | peak GPU, full → batched |
+|---|---|---|---|---|
+| melody, 48 targets | 0.786 → 0.795 | +0.009 ± 0.016 | 0.834 → 0.831 | 1.8 → 1.8 GB |
+| detuned melody, 48 | 0.605 → 0.603 | −0.001 ± 0.012 | 1.101 → 1.111 | 1.8 → 1.8 GB |
+| acid line, `--lead`, 24 | 0.462 → 0.484 | +0.023 ± 0.017 | 1.440 → 1.435 | 9.2 → 6.8 GB |
+| melody, 8 s, 12 | 0.839 → 0.858 | +0.018 ± 0.011 | 0.747 → 0.763 | 9.1 → 2.6 GB |
+| BabySlakh piano, 20 | 0.571 → 0.590 | +0.019 ± 0.013 | 1.756 → 1.905 | 2.8 → 2.3 GB |
+| BabySlakh bass, 19 | 0.186 → 0.175 | −0.011 ± 0.023 | 1.617 → 1.644 | 5.7 → 3.3 GB |
+| BabySlakh mixes, 20 | 0.066 → 0.066 | +0.000 ± 0.008 | 1.666 → 1.664 | 7.1 → 2.2 GB |
+| mixes with basic-pitch, 20 | 0.409 → 0.412 | +0.003 ± 0.004 | 1.410 → 1.414 | 6.9 → 3.6 GB |
+
+No F1 difference is outside the noise. Loss may be very slightly higher (about 2 % on bass and
+at 8 s); on piano it is +0.148 ± 0.120, which could be noise. Clips that need splitting
+are somewhat slower, timed one fit at a time: 3 s melodies 59 → 51 s, 8 s melodies 105 → 131 s, 4 s
+mixes with two voices 91 → 119 s. A 15 s piano fit takes about 4 minutes and 3–4 GB; 60 s took
+about 26 minutes with three running at once. Memory depends on the patch: with long release
+times the windows grow, and piano reached 8.5 GB at 60 s.
+
+**Pruning on long clips.** The loss is an average over the clip, so one note's share of it
+shrinks with length, while `prune_tol` was fixed. At 60 s that threw most notes away, so it is
+scaled down beyond `prune_reference_s`:
+
+| test | fixed | scaled from 4 s | scaled from 15 s (default) |
+|---|---|---|---|
+| melody, 15 s, 12 | **0.830**, 733 of 690 notes | 0.792, 901 notes | same as fixed |
+| piano, 15 s, 8 | 0.452, 255 of 797 | 0.459, 386 | same as fixed |
+| melody, 30 s, 6 | 0.745, 521 of 708, loss 1.102 | not run | **0.773**, 709, loss 0.908 |
+| piano, 60 s, 6 | 0.372, 348 of 1748, loss 2.192 | 0.471, 1442, loss 1.681 | **0.486**, 813, loss 1.805 |
+
+Long clips finish, but real instruments fit worse the longer they are: piano is 0.59 at 4 s,
+0.45 at 15 s and 0.49 at 60 s, while melodies stay at 0.77–0.86 up to 30 s and mixes with
+basic-pitch at 0.38–0.41 up to 60 s.
+
+Other ways to save memory: fitting overlapping segments separately gives each its own patch
+and breaks notes at the seams; gradient checkpointing saves less and runs slower; a random
+window each step holds memory constant but makes gradients approximate and needs more steps;
+falling back to the CPU never fails but is very slow.
 
 ## Evaluation on synthetic targets
 
@@ -431,6 +501,12 @@ Real clips, current code, 2 voices, single runs (loss, notes, drums' share of th
 
 ### Next
 
+Pretraining a model on the downloaded library looks less useful than it sounds. The library has no
+note labels, and predicting a patch has no ceiling to reach for: starting from the *true* patch on
+24 melodies scored lower than the default start (0.766 against 0.793–0.818, stage 1 0.588 against
+0.656–0.672), at the same speed, and doesn't let a shorter run catch up (Quick: 0.662 against 0.732).
+Better starting notes are what help (see "Pretrained tools"), and those need labelled data.
+
 1. **Voices for transcribed notes.** basic-pitch gives notes without instruments, so all
    of them share one patch. Assigning them to voices is now the largest gap in
    re-creating a dense track.
@@ -550,6 +626,7 @@ members that land outside the destination. There is deliberately no delete butto
 * All notes in a voice share one patch; velocity only scales amplitude and
   filter envelope depth. Detuned sounds score far below clean ones, and fits of
   them nearly always stay one copy (see "Detuned timbres"). No chorus.
+* Real instruments fit worse in longer clips (see "Memory and long clips").
 * On dense music the fitter alone finds few notes; basic-pitch's notes fix that
   but all go to one voice (see "Pretrained tools").
 * Drum hits are fitted but only exported as a list (`params.json`, the web
