@@ -12,7 +12,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from musicfit.drumkit import DRUMS, make_kit  # noqa: E402
+from musicfit.drumkit import BUILT_IN, DRUMS, GM_NOTE, GM_TO_DRUM, GROUP, _drum_of, make_kit  # noqa: E402
 from musicfit.drums import KitVoice, NoiseVoice, load_drum_voice  # noqa: E402
 from musicfit.fit import FitConfig, fit  # noqa: E402
 from musicfit.notes import Note, write_midi  # noqa: E402
@@ -23,9 +23,9 @@ SR = 16000
 
 def test_the_built_in_kits():
     kit = make_kit("808,909", SR)
-    assert kit.names == [name for name, _ in DRUMS] and kit.kit_names == ["808", "909"]
-    assert kit.available[:, 0].all()  # the 808 has every drum
+    assert kit.names == [name for name, _ in DRUMS if name not in ("tambourine", "bongo")] and kit.kit_names == ["808", "909"]
     assert not kit.available[kit.names.index("cowbell"), 1]  # the 909 has no cowbell
+    assert not kit.available[kit.names.index("ride"), 0] and kit.available[kit.names.index("ride"), 1]  # nor the 808 a ride
     peaks = kit.samples.abs().amax(dim=2)
     assert torch.allclose(peaks[kit.available], torch.ones(int(kit.available.sum())), atol=1e-4)
     freqs = torch.fft.rfftfreq(kit.samples.shape[2], 1 / SR)
@@ -36,6 +36,29 @@ def test_the_built_in_kits():
 
     for k in (0, 1):
         assert share("kick", k, 0, 200) > 0.8 and share("closed hat", k, 4000, 8000) > 0.8
+
+
+@pytest.mark.parametrize("name", list(BUILT_IN))
+def test_every_machine_sounds_like_its_drums(name):
+    kit = make_kit(name, SR)
+    assert set(kit.names) <= set(GROUP) and torch.isfinite(kit.samples).all()
+    freqs = torch.fft.rfftfreq(kit.samples.shape[2], 1 / SR)
+
+    def share(drum, lo, hi):
+        power = torch.fft.rfft(kit.samples[kit.names.index(drum), 0]).abs() ** 2
+        return float(power[(freqs >= lo) & (freqs < hi)].sum() / power.sum())
+
+    assert share("kick", 0, 250) > 0.8 and share("closed hat", 3000, 8000) > 0.6 and share("snare", 150, 8000) > 0.9
+    for drum in kit.names:  # each sound is there, and starts at once
+        x = kit.samples[kit.names.index(drum), 0]
+        assert x.abs().max() == pytest.approx(1.0, abs=1e-4) and x[: SR // 50].abs().max() > 0.1
+
+
+def test_kit_files_are_named_for_the_new_drums_too():
+    assert [_drum_of(f) for f in ("Ride 1.wav", "tamb.wav", "Shaker-2.wav", "conga hi.wav", "mid tom.wav", "Cabasa.wav",
+                                  "claves.wav", "crash.wav", "cowbell.wav", "ride bell.wav")] == [
+        "ride", "tambourine", "shaker", "conga", "mid tom", "shaker", "claves", "crash", "cowbell", "ride"]
+    assert all(GM_TO_DRUM[GM_NOTE[d]] == d for d in GM_NOTE)  # each drum's note reads back as that drum
 
 
 def test_a_kit_of_your_own(tmp_path):
@@ -113,11 +136,12 @@ def test_a_drums_only_fit_finds_the_hits_and_the_kit():
     # drum_start is left at its default: with no voices the drums have to start at once. The default
     # hit cost suits real drums, which no kit here matches exactly; with an exact match, a higher
     # one finds just the true hits (design.md).
-    res = fit(target, FitConfig(n_voices=0, roll_steps=200, note_steps=60, polish_steps=0, device="cpu", tuning_cents=0.0,
+    # (with 17 drums to choose from, 200 steps of stage 1 still build the snare out of a clap and an open hat)
+    res = fit(target, FitConfig(n_voices=0, roll_steps=400, note_steps=60, polish_steps=0, device="cpu", tuning_cents=0.0,
                                 log_every=1000, seed=1, drum_sparsity_alone=5.0), verbose=False)
     names = res.noise.names
     hits = {(names[k], round(t, 1)) for k, t, v in res.noise.hits() if v > 0.3}
-    assert {("kick", 0.2), ("kick", 0.7), ("snare", 0.4) if ("snare", 0.4) in hits else ("snare", 0.5)} <= hits
+    assert hits == {("kick", 0.2), ("kick", 0.7), ("snare", 0.4) if ("snare", 0.4) in hits else ("snare", 0.5)}
     chosen = {d["name"]: d["kit"] for d in res.noise.describe()}
     assert chosen["kick"] == "808" and chosen["snare"] == "909"
     assert res.notes == [] and res.audio.numel() == SR

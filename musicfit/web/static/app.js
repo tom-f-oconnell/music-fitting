@@ -200,7 +200,8 @@ function showJobHead(job) {
   $("#delete-btn").hidden = active;
   $("#progress-wrap").hidden = !active;
   $("#progress-bar").style.width = (job.progress * 100).toFixed(1) + "%";
-  const stageName = job.stage === "roll" ? "Stage 1/2: discovering notes (piano roll)" : job.stage === "notes" ? "Stage 2/2: refining notes and patch" : "Waiting for the worker";
+  const stageName = job.stage === "roll" ? "Stage 1/2: discovering notes (piano roll)" : job.stage === "notes" ? "Stage 2/2: refining notes and patch" :
+    job.stage === "kits" ? `Comparing drum kits, ${job.detail}` : job.stage === "drums" ? "Fitting the drums" : "Waiting for the worker";
   const c = job.config;
   $("#progress-text").textContent = job.status === "queued" ? "Queued behind another fit." :
     `${stageName} — step ${job.step}/${job.total} · ${job.elapsed_s.toFixed(0)} s elapsed` +
@@ -259,6 +260,7 @@ async function showResult(job) {
   buildVoiceTabs();
   buildSliders();
   buildDrumSliders();
+  showKitComparison();
   showMetrics();
   const ctx = audioCtx();
   const [t, f] = await Promise.all(["target", "fit"].map(async (w) => {
@@ -392,6 +394,40 @@ function drumVoiceKind() {
   return "tune" in d ? "kit" : "noise";
 }
 
+// The kits a "compare" fit tried, best first, each with its drums to listen to.
+function showKitComparison() {
+  const r = S.job.result, rows = $("#kit-compare-rows");
+  $("#kit-compare").hidden = !(r.drum_kits || []).length;
+  rows.innerHTML = "";
+  if (!(r.drum_kits || []).length) return;
+  $("#kit-compare-note").textContent = `Each was fitted to ${r.drum_kits_on === "drum stem" ? "the drums on their own (Demucs's drum stem)" : "the whole clip"}; the fit kept the lowest loss.`;
+  r.drum_kits.forEach((k, i) => {
+    const tr = document.createElement("tr");
+    tr.className = i === 0 ? "used" : "";
+    tr.innerHTML = "<td></td><td></td><td></td><td></td>";
+    const [name, loss, hits, cell] = tr.children;
+    name.textContent = k.kit.split(",").map(kitName).join(" + ");
+    loss.textContent = k.loss.toFixed(3);
+    hits.textContent = k.n_hits;
+    const b = document.createElement("button");
+    b.className = "small";
+    b.textContent = "▶ Listen";
+    b.title = "This kit's fitted drums on their own";
+    b.dataset.play = k.audio;
+    b.onclick = async () => {
+      if (S.play && S.play.which === k.audio) { stop(); return; }
+      if (!S.buffers[k.audio]) {
+        const job = S.job.id, buf = await (await api(`/api/jobs/${job}/audio/${k.audio}.wav`)).arrayBuffer();
+        if (S.job.id !== job) return;
+        S.buffers[k.audio] = await audioCtx().decodeAudioData(buf);
+      }
+      play(k.audio, 0);
+    };
+    cell.appendChild(b);
+    rows.appendChild(tr);
+  });
+}
+
 function fittedDrumSettings() {
   const kind = drumVoiceKind();
   if (!kind) return null;
@@ -426,7 +462,7 @@ function buildDrumSliders() {
       row.title = S.specs.kit_help;
       row.innerHTML = '<span class="pname">kit</span><select></select>';
       const sel = row.querySelector("select");
-      for (const name of f.kits) sel.add(new Option(name + (name === f.kit ? " (fitted)" : ""), name));
+      for (const name of f.kits) sel.add(new Option(kitName(name) + (name === f.kit ? " (fitted)" : ""), name));
       sel.value = s.kit;
       sel.onchange = () => { s.kit = sel.value; title.textContent = drumLabel(k); drawRoll(); changed(); };
       box.appendChild(row);
@@ -661,7 +697,7 @@ function layoutRoll(c) {
 function drumLabel(kind) {
   const d = (S.job.result.drums || [])[kind];
   const kit = (S.drumSettings && S.drumSettings[kind] && S.drumSettings[kind].kit) || (d && d.kit);
-  return d ? d.name + (kit ? ` (${kit})` : "") : `drum ${kind + 1}`;
+  return d ? d.name + (kit ? ` (${kitName(kit)})` : "") : `drum ${kind + 1}`;
 }
 
 function drawRoll() {
@@ -758,6 +794,75 @@ function drawAll() {
 
 const formatSize = (bytes) => (bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" : Math.max(bytes / 1e6, 0.1).toFixed(1) + " MB");
 
+// ---------------------------------------------------------------- drum kits
+
+const GENERIC = { id: "noise", name: "Generic sounds", kind: "generic", drums: [], installed: true };
+const kitName = (id) => (S.kitNames && S.kitNames[id]) || id;
+
+async function refreshKits() {
+  let r;
+  try { r = await (await api("/api/drumkits")).json(); } catch (e) { return; }
+  const installed = r.kits.filter((k) => k.installed).map((k) => k.id).join();
+  if (S.kits && installed === S.kitsInstalled) return;  // nothing new: keep the boxes as they are
+  const ticked = S.kits ? new Set(chosenKits()) : new Set(r.default);
+  for (const k of r.kits) if (k.installed && S.kits && !S.kits.some((x) => x.id === k.id && x.installed)) ticked.add(k.id);  // just downloaded
+  S.kits = r.kits;
+  S.kitsInstalled = installed;
+  S.kitDefault = r.default;
+  S.kitNames = Object.fromEntries([...r.kits, GENERIC].map((k) => [k.id, k.name.replace(" (imitation)", "")]));
+  const box = $("#kit-chips");
+  box.innerHTML = "";
+  for (const k of [...r.kits.filter((k) => k.installed), GENERIC]) {
+    const chip = document.createElement("label");
+    chip.className = "chip";
+    const what = { machine: "a drum machine, made from its circuits", imitation: "an imitation: that machine played recordings, which can't be shipped",
+                   recorded: "a recorded acoustic kit", folder: "your own samples", generic: "shapes its own sounds, so it finds hits but doesn't say which drum they are" }[k.kind];
+    chip.title = `${k.name}: ${what}.` + (k.drums.length ? ` ${k.drums.length} drums: ${k.drums.join(", ")}.` : "") + (k.credit ? ` ${k.credit}.` : "");
+    chip.innerHTML = `<input type="checkbox"> <span></span>`;
+    chip.querySelector("span").textContent = kitName(k.id);
+    const cb = chip.querySelector("input");
+    cb.value = k.id;
+    cb.checked = ticked.has(k.id);
+    cb.onchange = syncKits;
+    box.appendChild(chip);
+  }
+  const missing = r.kits.filter((k) => !k.installed);
+  if (missing.length) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "link";
+    more.textContent = `+ ${missing.map((k) => k.name).join(", ")} (download)`;
+    more.title = "Recorded acoustic kits, from the Data menu";
+    more.onclick = openDataDialog;
+    box.appendChild(more);
+  }
+  syncKits();
+}
+
+function chosenKits() {
+  return [...document.querySelectorAll("#kit-chips input:checked")].map((cb) => cb.value);
+}
+
+function syncKits() {
+  const kits = chosenKits(), compare = $("#compare-kits").checked;
+  $("#drum-kit").value = kits.join(",");
+  document.querySelectorAll("#kit-chips .chip").forEach((c) => c.classList.toggle("on", c.querySelector("input").checked));
+  $("#kit-hint").textContent = !kits.length ? "Choose at least one kit." :
+    compare ? (kits.length < 2 ? "Choose at least two kits to compare." :
+      `Each of the ${kits.length} kits is fitted to the drums on their own (Demucs's drum stem when it's installed), and the fit keeps the one with the lowest loss.`) :
+    kits.includes("noise") && kits.length > 1 ? "The generic sounds can't be mixed with kits: compare them instead." :
+    kits.length > 1 ? "Each drum plays whichever of these kits' versions fits it best." : "";
+}
+
+function kitProblem() {
+  if ($("#fit-mode").value === "notes") return "";
+  const kits = chosenKits(), compare = $("#compare-kits").checked;
+  if (!kits.length) return "Choose at least one drum kit.";
+  if (compare && kits.length < 2) return "Choose at least two drum kits to compare.";
+  if (!compare && kits.includes("noise") && kits.length > 1) return "The generic sounds can't be mixed with kits: compare them instead.";
+  return "";
+}
+
 async function refreshLibrary() {
   clearTimeout(S.libraryTimer);
   const problem = $("#data-error");
@@ -771,6 +876,7 @@ async function refreshLibrary() {
   }
   showTracks();
   showDataDialog();
+  refreshKits();  // a kit that finished downloading can be chosen at once
   const active = S.library.downloads.some((d) => d.status === "queued" || d.status === "running");
   if (active || $("#data-dialog").open) S.libraryTimer = setTimeout(refreshLibrary, active ? 1500 : 5000);
 }
@@ -1017,13 +1123,16 @@ function wire() {
   $("#fit-mode").onchange = (e) => {
     const mode = e.target.value, form = $("#upload-form").elements;
     form.voices.disabled = mode === "drums";
-    form.drum_kit.disabled = mode === "notes";
+    $("#kit-wrap").hidden = $("#compare-wrap").hidden = mode === "notes";
     if (S.specs && S.specs.tools.demucs && !separate.dataset.chosen) separate.checked = mode === "drums";
   };
+  $("#compare-kits").onchange = syncKits;
   $("#upload-form").onsubmit = async (e) => {
     e.preventDefault();
     const chosen = !!$("#track").value;
     if (!chosen && !file.files[0]) { alert("Choose an audio file first."); return; }
+    const problem = kitProblem();
+    if (problem) { alert(problem); return; }
     const fd = new FormData(e.target);
     if (chosen) fd.delete("file");
     else fd.delete("track");
@@ -1176,6 +1285,7 @@ async function main() {
   $("#separate-wrap").hidden = !S.specs.tools.demucs;
   $("#basic-pitch-wrap").hidden = !S.specs.tools.basic_pitch;
   wire();
+  refreshKits();
   refreshLibrary();
   await refreshJobs();
   setInterval(refreshJobs, 4000);

@@ -22,11 +22,12 @@ import requests
 import soundfile as sf
 
 AUDIO_EXTS = (".opus", ".ogg", ".oga", ".flac", ".wav", ".mp3", ".m4a", ".aac", ".webm")
-ARCHIVE_EXTS = (".tar.gz", ".tgz", ".tar", ".zip")
+ARCHIVE_EXTS = (".tar.gz", ".tgz", ".tar.bz2", ".tar", ".zip")
 EXAMPLES_DIR = os.path.join(os.path.dirname(__file__), "examples")
 EXAMPLES_ID = "examples"
 
 ZENODO_RECORD_URL = "https://zenodo.org/api/records/{}"
+DRUMKITS_DIR = "drumkits"  # drum kits to fit drums with, not tracks to fit (see drumkits.py)
 MAX_DOWNLOAD_GB = float(os.environ.get("MUSICFIT_MAX_DOWNLOAD_GB", 10))
 MAX_UNPACK_RATIO = 5  # an archive may unpack to this many times the download limit
 
@@ -49,6 +50,8 @@ SHIPPED_EXAMPLES = [
     Track(f"{EXAMPLES_ID}/bass_line.flac", "Bass line", note="A bass stem. Bass is harder: expect octave errors."),
     Track(f"{EXAMPLES_ID}/full_band.flac", "Full band",
           note="A dense mix. The fitter alone finds few notes here: try the automatic transcription under Advanced."),
+    Track(f"{EXAMPLES_ID}/drums.flac", "Drums",
+          note="A song's drums on their own: tambourine, kick, hi-hats, snare, claves and shaker. Try Fit: Drums only, and compare kits."),
 ]
 # The clips used to develop the fitter. They are copyrighted, so they aren't in the repository;
 # they are listed if the training set has been downloaded.
@@ -123,7 +126,7 @@ class Library:
                 "tracks": [asdict(t) for t in shipped + local]}]
         for name in sorted(os.listdir(self.root)):
             base = os.path.join(self.root, name)
-            if name.startswith(".") or not os.path.isdir(base):
+            if name.startswith(".") or name == DRUMKITS_DIR or not os.path.isdir(base):
                 continue
             tracks, size = self._scan(name, base)
             if not tracks:

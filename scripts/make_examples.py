@@ -17,12 +17,13 @@ import soundfile as sf  # noqa: E402
 from musicfit.dataset.library import EXAMPLES_DIR  # noqa: E402
 from musicfit.slakh import make_clips  # noqa: E402
 
-# file -> (source, as for make_clips; track)
+# file -> (source, as for make_clips; track; "drums" for that window's drum stems alone)
 CLIPS = {
-    "sparse_piano.flac": ("Piano", "Track00004"),
-    "busier_piano.flac": ("Piano", "Track00013"),
-    "bass_line.flac": ("Bass", "Track00013"),
-    "full_band.flac": ("mix", "Track00003"),
+    "sparse_piano.flac": ("Piano", "Track00004", ""),
+    "busier_piano.flac": ("Piano", "Track00013", ""),
+    "bass_line.flac": ("Bass", "Track00013", ""),
+    "full_band.flac": ("mix", "Track00002", ""),  # sounding throughout, with drums and five kinds of instrument
+    "drums.flac": ("mix", "Track00016", "drums"),  # 69 hits: tambourine, kick, hats, snare, claves and shaker
 }
 
 
@@ -31,10 +32,11 @@ def main():
     ap.add_argument("--data", default="data/babyslakh/babyslakh_16k", help="directory with the Track* directories")
     args = ap.parse_args()
     os.makedirs(EXAMPLES_DIR, exist_ok=True)
-    for name, (source, track) in CLIPS.items():
+    for name, (source, track, part) in CLIPS.items():
         clip = next(c for c in make_clips(args.data, source) if c.track == track)
-        sf.write(os.path.join(EXAMPLES_DIR, name), clip.audio.numpy(), 16000, subtype="PCM_16")
-        print(f"{name}: {track} from {clip.start:.0f} s, {source}, {len(clip.ref)} notes")
+        audio = clip.drum_audio if part == "drums" else clip.audio
+        sf.write(os.path.join(EXAMPLES_DIR, name), audio.numpy(), 16000, subtype="PCM_16")
+        print(f"{name}: {track} from {clip.start:.0f} s, {source}{' drums' if part else ''}, {len(clip.ref)} notes, {len(clip.drum_ref)} drum hits")
 
 
 if __name__ == "__main__":

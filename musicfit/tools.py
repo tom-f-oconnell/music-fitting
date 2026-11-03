@@ -114,6 +114,29 @@ def transcribe(
     return sorted(notes, key=lambda n: (n.onset, n.pitch))
 
 
+def compare_drum_kits(drums: torch.Tensor, cfg: FitConfig, kits: list[str], verbose: bool = False,
+                      progress: Callable[[dict], None] | None = None) -> list[dict]:
+    """Fit the drums alone with each kit in turn, and rank the kits by how well they did.
+
+    Args:
+        drums: [T] the drums to fit, ideally on their own (a Demucs drum stem).
+        cfg: fit configuration; voices are left out, and the drums start at once.
+        kits: ``drum_kit`` values to try, such as "808", "linndrum,dmx" or "noise".
+        progress: called as for :func:`musicfit.fit.fit`, with stage "kits" and the kit's place.
+
+    Returns:
+        [{"kit", "loss", "n_hits", "result"}], lowest loss first; ``result`` is that kit's FitResult.
+    """
+    loss_fn = MultiResolutionSTFTLoss(cfg.fft_sizes)
+    out = []
+    for i, kit in enumerate(kits):
+        sub = None if progress is None else (
+            lambda info, i=i, kit=kit: progress({**info, "stage": "kits", "kit": kit, "kit_index": i, "n_kits": len(kits)}))
+        res = fit(drums, replace(cfg, n_voices=0, drum_kit=kit, drum_kinds=cfg.drum_kinds or 3, drum_start=0.0), verbose, sub)
+        out.append({"kit": kit, "loss": float(loss_fn(res.audio, drums.float().cpu())), "n_hits": len(res.noise.hits()), "result": res})
+    return sorted(out, key=lambda r: r["loss"])
+
+
 def fit_with_tools(
     target: torch.Tensor,
     config: FitConfig | None = None,
@@ -121,6 +144,7 @@ def fit_with_tools(
     use_basic_pitch: bool = False,
     verbose: bool = True,
     progress: Callable[[dict], None] | None = None,
+    compare_kits: list[str] | None = None,
 ) -> FitResult:
     """Run :func:`musicfit.fit.fit` with Demucs and/or basic-pitch doing part of the work.
 
@@ -128,7 +152,9 @@ def fit_with_tools(
     to the drum stem only, so neither can explain the other's sound. With
     ``use_basic_pitch`` the transcription replaces stage 1 and all its notes in the fit's
     pitch range are kept: on mixes the fit's own ways of dropping notes cost far more
-    recall than they win in precision (design.md).
+    recall than they win in precision (design.md). With ``compare_kits`` each kit is first
+    fitted to the drums alone (:func:`compare_drum_kits`; Demucs's drum stem if Demucs is
+    installed, else the clip), and the fit then uses the best.
 
     Args:
         target: [T] mono target waveform.
@@ -137,10 +163,13 @@ def fit_with_tools(
         use_basic_pitch: start from transcribed notes.
         verbose: print progress.
         progress: as for :func:`musicfit.fit.fit`, called during the note fit only.
+        compare_kits: kits to compare (``drum_kit`` values); ignored without drums.
 
     Returns:
         A FitResult whose audio is the whole fit, and whose final history entry has the
-        loss against the full target.
+        loss against the full target. With ``compare_kits``, its ``drum_kits`` holds each
+        kit's loss, hit count and fitted drums (audio), best first, and ``drum_kits_on``
+        what they were fitted to ("drum stem" or "clip").
     """
     cfg = config or FitConfig()
     note_cfg = replace(cfg, prune_tol=0.0, note_sparsity=0.0, prune_velocity=0.0) if use_basic_pitch else cfg
@@ -150,22 +179,38 @@ def fit_with_tools(
             return None
         return [n for n in transcribe(audio, cfg.sr) if cfg.pitch_min <= n.pitch <= cfg.pitch_max]
 
-    if not use_demucs:
+    compare = bool(compare_kits) and bool(cfg.drum_kinds or cfg.n_voices == 0)
+    if not use_demucs and not compare:
         return fit(target, note_cfg, verbose, progress, init_notes=initial_notes(target))
 
-    stems = separate(target, cfg.sr, device=cfg.device)
-    if cfg.n_voices == 0:  # drums only
-        res = fit(stems["drums"], replace(cfg, drum_start=0.0), verbose, progress)
+    stems = separate(target, cfg.sr, device=cfg.device) if use_demucs or (compare and available_tools()["demucs"]) else None
+    ranked, best = [], None
+    if compare:
+        on = stems["drums"] if stems else target
+        ranked = compare_drum_kits(on, cfg, compare_kits, verbose, progress)
+        cfg, note_cfg = replace(cfg, drum_kit=ranked[0]["kit"]), replace(note_cfg, drum_kit=ranked[0]["kit"])
+        # the winner is the final fit's drums too where those are fitted alone to the same audio
+        best = ranked[0]["result"] if (stems is not None) == use_demucs else None
+
+    def finish(res: FitResult) -> FitResult:
         loss = float(MultiResolutionSTFTLoss(cfg.fft_sizes)(res.audio, target.float().cpu()))
-        res.history.append({"stage": "final", "step": 0, "loss": loss, "n_notes": 0})
+        if res.history[-1].get("stage") != "final":
+            res.history.append({"stage": "final", "step": 0, "loss": loss, "n_notes": len(res.notes)})
+        res.drum_kits = [{"kit": r["kit"], "loss": r["loss"], "n_hits": r["n_hits"], "audio": r["result"].audio} for r in ranked]
+        res.drum_kits_on = "drum stem" if stems is not None else "clip"
         return res
+
+    if cfg.n_voices == 0:  # drums only
+        if best is not None:
+            return finish(best)
+        return finish(fit(stems["drums"] if use_demucs else target, replace(cfg, drum_start=0.0), verbose, progress))
+    if not use_demucs:  # notes and drums together on the clip, with the kit that did best on the drums alone
+        return finish(fit(target, note_cfg, verbose, progress, init_notes=initial_notes(target)))
     pitched = sum(stems[s] for s in PITCHED_STEMS if s in stems)
     res = fit(pitched, replace(note_cfg, drum_kinds=0, noise_floor=False), verbose, progress,
               init_notes=initial_notes(pitched))
     if cfg.drum_kinds or cfg.noise_floor:
         drum_progress = None if progress is None else (lambda info: progress({**info, "stage": "drums"}))
-        drums = fit(stems["drums"], replace(cfg, n_voices=0, drum_start=0.0), verbose, drum_progress)
+        drums = best or fit(stems["drums"], replace(cfg, n_voices=0, drum_start=0.0), verbose, drum_progress)
         res.noise, res.audio = drums.noise, res.audio + drums.audio
-    loss = float(MultiResolutionSTFTLoss(cfg.fft_sizes)(res.audio, target.float().cpu()))
-    res.history.append({"stage": "final", "step": 0, "loss": loss, "n_notes": len(res.notes)})
-    return res
+    return finish(res)

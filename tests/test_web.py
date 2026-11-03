@@ -269,6 +269,52 @@ def test_upload_job_with_tools(client, monkeypatch):
     assert client.delete(f"/api/jobs/{job['id']}").status_code == 200
 
 
+def _drum_clip():
+    from musicfit.drumkit import make_kit
+
+    kit = make_kit("808,909", 16000)
+    x = np.zeros(16000)
+    for t, drum, k in ((0.2, "kick", 0), (0.45, "snare", 1), (0.7, "kick", 0)):
+        i = int(t * 16000)
+        x[i:] += 0.4 * kit.samples[kit.names.index(drum), k, : 16000 - i].numpy()
+    buf = io.BytesIO()
+    sf.write(buf, x, 16000, format="WAV")
+    return buf.getvalue()
+
+
+def test_kits_are_checked_by_name_against_what_is_installed(client):
+    kits = client.get("/api/drumkits").json()
+    assert kits["default"] and set(kits["default"]) <= {k["id"] for k in kits["kits"] if k["installed"]}
+    form = {"duration": "1", "fit_mode": "drums"}
+    for kit, compare, why in (("808,../../etc", False, "no such drum kit"), ("salamander", False, "no such drum kit"),
+                              ("808,noise", False, "can't be mixed"), ("808", True, "at least two")):
+        bad = client.post("/api/jobs", files={"file": ("x.wav", _drum_clip(), "audio/wav")},
+                          data={**form, "drum_kit": kit, **({"compare_kits": "on"} if compare else {})})
+        assert bad.status_code == 422 and why in bad.json()["detail"], (kit, bad.json())
+
+
+def test_a_job_can_compare_kits_and_play_each(client, monkeypatch):
+    monkeypatch.setattr("musicfit.tools.available_tools", lambda: {"demucs": False, "basic_pitch": False})
+    job = client.post("/api/jobs", files={"file": ("x.wav", _drum_clip(), "audio/wav")},
+                      data={"duration": "1", "fit_mode": "drums", "roll_steps": "100", "note_steps": "10",
+                            "drum_kit": "cr78,808,909", "compare_kits": "on"}).json()
+    seen = set()
+    t0 = time.time()
+    while (j := client.get(f"/api/jobs/{job['id']}").json())["status"] in ("queued", "running") and time.time() - t0 < 300:
+        seen.add(j["detail"])
+        time.sleep(0.05)
+    assert j["status"] == "done", j["error"]
+    r = j["result"]
+    assert sorted(k["kit"] for k in r["drum_kits"]) == ["808", "909", "cr78"]
+    assert [k["loss"] for k in r["drum_kits"]] == sorted(k["loss"] for k in r["drum_kits"]) and r["drum_kits_on"] == "clip"
+    assert {d["kit"] for d in r["drums"]} == {r["drum_kits"][0]["kit"]}  # the job's drums are the best kit's
+    assert any(d.startswith("kit 3 of 3") for d in seen)
+    for k in r["drum_kits"]:
+        wav = client.get(f"/api/jobs/{job['id']}/audio/{k['audio']}.wav")
+        assert wav.status_code == 200 and wav.content[:4] == b"RIFF"
+    assert client.get(f"/api/jobs/{job['id']}/audio/kit_7.wav").status_code == 404
+
+
 def test_rejects_bad_input(client):
     bad = client.post("/api/jobs", files={"file": ("x.wav", b"not audio", "audio/wav")}, data={"duration": "600"})
     assert bad.status_code == 422

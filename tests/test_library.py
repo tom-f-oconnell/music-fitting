@@ -443,3 +443,30 @@ def test_archive_bomb_is_refused(tmp_path, monkeypatch):
                                          ("https://zenodo.org/record/9", "9")])
 def test_zenodo_record_forms(text, record):
     assert zenodo_record_id(text) == record
+
+
+def test_drum_kits_download_from_the_data_menu_and_become_choices(app, tmp_path, monkeypatch):
+    client = TestClient(app)
+    presets = {p["id"]: p for p in client.get("/api/library").json()["presets"]}
+    assert presets["salamander"]["drum_kit"] and not presets["salamander"]["cached"] and presets["drskit"]["description"]
+    kits = {k["id"]: k for k in client.get("/api/drumkits").json()["kits"]}
+    assert not kits["salamander"]["installed"]
+
+    def fake_fetch(kit, root, on_progress):
+        oh = os.path.join(root, "drumkits", kit, "salamanderDrumkit", "OH")
+        os.makedirs(oh)
+        t = np.arange(8000) / 16000
+        for name, f in (("kick_OH_F_1", 60), ("snare_OH_F_1", 200)):
+            sf.write(os.path.join(oh, name + ".wav"), 0.5 * np.sin(2 * np.pi * f * t), 16000)
+        on_progress(10, 10, "salamanderDrumkit.tar.bz2")
+        return {"title": "Salamander Drumkit", "license": "CC BY-SA 3.0"}
+
+    monkeypatch.setattr("musicfit.web.downloads.fetch_drumkit", fake_fetch)
+    d = client.post("/api/library/downloads", json={"preset": "salamander"}).json()
+    assert d["dataset"] == "drumkits/salamander"
+    assert _wait_download(client, d["id"])["status"] == "done"
+    assert next(p for p in client.get("/api/library").json()["presets"] if p["id"] == "salamander")["complete"]
+    kits = {k["id"]: k for k in client.get("/api/drumkits").json()["kits"]}
+    assert kits["salamander"]["installed"] and kits["salamander"]["drums"] == ["kick", "snare"]
+    # the kit's samples aren't tracks to fit
+    assert all(ds["id"] != "drumkits" for ds in client.get("/api/library").json()["datasets"])

@@ -53,14 +53,13 @@
               <option value="drums">Drums only</option>
             </select>
           </label>
-          <label title="Each drum is fitted with the kit that sounds most like it">Drum kit
-            <select name="drum_kit" id="drum-kit">
-              <option value="808,909" selected>808 or 909, per drum</option>
-              <option value="808">808</option>
-              <option value="909">909</option>
-              <option value="noise">Generic noise bursts</option>
-            </select>
-          </label>
+          <label class="check compare" id="compare-wrap" title="Fit the drums on their own with each chosen kit in turn, keep the one with the lowest loss, and show how each did. Takes about 25 s more per kit."><input type="checkbox" name="compare_kits" id="compare-kits"> Compare the kits</label>
+        </div>
+        <div class="kits" id="kit-wrap">
+          <div class="kits-head">Drum kits</div>
+          <div id="kit-chips" class="chips"></div>
+          <input type="hidden" name="drum_kit" id="drum-kit">
+          <p class="hint" id="kit-hint"></p>
         </div>
         <details>
           <summary>Advanced</summary>
@@ -198,6 +197,11 @@
             <button id="drum-reset-btn" class="small">Reset to fitted</button>
           </div>
           <p class="hint legend"><i class="tick fit"></i> fitted value · hover over a setting to see what it does · one box per drum that was hit</p>
+          <div id="kit-compare" hidden>
+            <h3>Kits compared</h3>
+            <p class="hint" id="kit-compare-note"></p>
+            <table class="kit-table"><thead><tr><th>Kit</th><th title="How far its drums were from the drums it was fitted to: lower is closer">Loss</th><th>Hits</th><th></th></tr></thead><tbody id="kit-compare-rows"></tbody></table>
+          </div>
           <div id="drum-sliders" class="slider-grid"></div>
         </section>
 

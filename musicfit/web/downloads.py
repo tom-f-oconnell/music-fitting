@@ -1,7 +1,8 @@
 """Background dataset downloads into the library, one at a time, recorded on disk.
 
 The server has no login, so what a client can ask for is deliberately narrow: searches,
-YouTube links and Zenodo record numbers, never another URL or a path on this machine.
+YouTube links and Zenodo record numbers, never another URL or a path on this machine. Drum
+kits come only from the fixed addresses in :data:`musicfit.dataset.drumkits.RECORDED`.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from urllib.parse import urlparse
 
 from ..dataset.aphex_twin_catalog import aphex_twin_works
 from ..dataset.catalog import musicbrainz_tracks, save_catalog
-from ..dataset.library import PRESETS, Library, fetch_zenodo, slug, zenodo_record_id
+from ..dataset.drumkits import RECORDED, fetch_drumkit, kit_path
+from ..dataset.library import DRUMKITS_DIR, PRESETS, Library, fetch_zenodo, slug, zenodo_record_id
 from ..dataset.youtube import Manifest, YouTubeClient, build_dataset, download_videos
 
 SOURCES = {
@@ -28,6 +30,10 @@ SOURCES = {
     "url": {"label": "A YouTube video or playlist", "placeholder": "https://www.youtube.com/..."},
     "zenodo": {"label": "A Zenodo record", "placeholder": "Record number or zenodo.org link"},
 }
+# the recorded drum kits, offered next to the datasets; they go to <data>/drumkits/<kit>
+KIT_PRESETS = {k: {"name": v["name"], "source": "drumkit", "query": k, "description": v["description"], "drum_kit": True}
+               for k, v in RECORDED.items()}
+ALL_PRESETS = {**PRESETS, **KIT_PRESETS}
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 MAX_VIDEO_S = 1200.0  # searches and playlists skip anything longer: long mixes are poor material, and large
 KEEP_RECORDS = 50
@@ -98,20 +104,23 @@ class DownloadManager:
         have = {d["id"] for d in self.library.datasets()}
         return {
             "sources": [{"id": k, **v} for k, v in SOURCES.items()],
-            "presets": [{"id": k, "cached": k in have, "complete": self._complete(k), **v} for k, v in PRESETS.items()],
+            "presets": [{"id": k, "cached": self._complete(k) if k in KIT_PRESETS else k in have, "complete": self._complete(k), **v}
+                        for k, v in ALL_PRESETS.items()],
             "downloads": [asdict(d) for d in sorted(self.records.values(), key=lambda d: -d.created)],
             "can_use_youtube": importlib.util.find_spec("yt_dlp") is not None,
         }
 
     def _complete(self, preset: str) -> bool:
+        if preset in KIT_PRESETS:
+            return kit_path(preset, self.library.root) is not None
         marker = PRESETS[preset].get("complete_when")
         return bool(marker) and os.path.isdir(os.path.join(self.library.root, preset, marker))
 
     def submit_preset(self, preset: str) -> dict:
-        if preset not in PRESETS:
+        if preset not in ALL_PRESETS:
             raise ValueError(f"unknown dataset: {preset}")
-        p = PRESETS[preset]
-        return self._enqueue(preset, p["name"], p["source"], p["query"], None)
+        p = ALL_PRESETS[preset]
+        return self._enqueue(f"{DRUMKITS_DIR}/{preset}" if preset in KIT_PRESETS else preset, p["name"], p["source"], p["query"], None)
 
     def submit(self, source: str, query: str, name: str = "", limit: int | None = 25) -> dict:
         query = _check_query(source, query)
@@ -172,6 +181,11 @@ class DownloadManager:
             self._save(force=True)
 
     def _fetch(self, d: Download, out_dir: str) -> dict:
+        if d.source == "drumkit":
+            d.unit = "bytes"
+            info = fetch_drumkit(d.query, self.library.root, lambda done, total, name: self._step(d, done, total, name))
+            d.done, d.total, d.message = d.total or d.done, d.total, "Downloaded and unpacked: it's now among the drum kits."
+            return info
         if d.source == "zenodo":
             d.unit = "bytes"
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import tempfile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from ..dataset import drumkits
 from ..dataset.library import Library
 from ..drums import KIT_SPECS, KERNEL_SPECS
 from ..notes import write_midi
@@ -149,7 +151,6 @@ class MidiRequest(BaseModel):
 
 
 FIT_MODES = ("notes_and_drums", "notes", "drums")
-DRUM_KITS = ("808,909", "808", "909", "noise")  # the web app offers built-in kits only, never a path
 
 
 class DownloadRequest(BaseModel):
@@ -163,6 +164,7 @@ class DownloadRequest(BaseModel):
 def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> FastAPI:
     jobs = JobManager(jobs_dir or os.environ.get("MUSICFIT_JOBS", os.path.join(os.getcwd(), "web_jobs")))
     library = Library(data_dir or os.environ.get("MUSICFIT_DATA", os.path.join(os.getcwd(), "data")))
+    drumkits.DATA_ROOT = library.root  # where fits look for downloaded kits
     downloads = DownloadManager(library)
     app = FastAPI(title="musicfit")
     app.add_middleware(RequestLog, path=os.path.join(jobs.root, "requests.log"))
@@ -208,6 +210,11 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
             "kit_help": KIT_HELP,
         }
 
+    @app.get("/api/drumkits")
+    def list_drumkits():
+        """Every drum kit, with which are installed, and the ones a fit uses unless told otherwise."""
+        return {"kits": drumkits.catalogue(library.root), "default": drumkits.default_kits(library.root)}
+
     @app.get("/api/jobs")
     def list_jobs():
         return jobs.list()
@@ -230,21 +237,32 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
         separate: bool = Form(False),
         basic_pitch: bool = Form(False),
         fit_mode: str = Form("notes_and_drums"),
-        drum_kit: str = Form("808,909"),
+        drum_kit: str = Form(""),
+        compare_kits: bool = Form(False),
     ):
         if not 0.25 <= duration <= MAX_DURATION_S:
             raise HTTPException(422, f"duration must be between 0.25 and {MAX_DURATION_S} s")
         if not 1 <= voices <= 4 or not 0 <= pitch_min < pitch_max <= 127:
             raise HTTPException(422, "1-4 voices and 0 <= pitch_min < pitch_max <= 127")
-        if fit_mode not in FIT_MODES or drum_kit not in DRUM_KITS:
-            raise HTTPException(422, f"fit_mode must be one of {FIT_MODES} and drum_kit one of {DRUM_KITS}")
+        if fit_mode not in FIT_MODES:
+            raise HTTPException(422, f"fit_mode must be one of {FIT_MODES}")
+        # kits by name from what is installed, never a path
+        kits = [k for k in drum_kit.split(",") if k] or drumkits.default_kits(library.root)
+        known = {k["id"] for k in drumkits.catalogue(library.root) if k["installed"]} | {"noise"}
+        if fit_mode != "notes":
+            if not set(kits) <= known:
+                raise HTTPException(422, f"no such drum kit (or not downloaded): {', '.join(sorted(set(kits) - known))}")
+            if "noise" in kits and len(kits) > 1 and not compare_kits:
+                raise HTTPException(422, "the generic sounds can't be mixed with kits: compare them instead")
+            if compare_kits and len(kits) < 2:
+                raise HTTPException(422, "choose at least two drum kits to compare")
         tools = available_tools()
         if (separate and not tools["demucs"]) or (basic_pitch and not tools["basic_pitch"]):
             raise HTTPException(422, "that tool is not installed; see requirements-tools.txt")
         cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
                    note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
                    seed=seed, lead=lead, full_memory=full_memory, separate=separate, basic_pitch=basic_pitch,
-                   fit_mode=fit_mode, drum_kit=drum_kit)
+                   fit_mode=fit_mode, drum_kit=",".join(kits), compare_kits=compare_kits and fit_mode != "notes")
         if track:
             return jobs.submit_library(library.title(track), library.resolve(track), cfg).public()
         if file is None:
@@ -316,7 +334,7 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
 
     @app.get("/api/jobs/{job_id}/audio/{which}.wav")
     def job_audio(job_id: str, which: str):
-        if which not in ("target", "fit") or jobs.get(job_id) is None:
+        if not (which in ("target", "fit") or re.fullmatch(r"kit_\d+", which)) or jobs.get(job_id) is None:
             raise HTTPException(404)
         path = os.path.join(jobs.dir(job_id), f"{which}.wav")
         if not os.path.exists(path):

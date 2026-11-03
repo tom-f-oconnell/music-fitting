@@ -97,6 +97,9 @@ class FitResult:
     tuning_cents: float = 0.0  # pitch-grid offset used in stage 1
     noise: NoiseVoice | None = None  # drums / noise floor, if fitted (its render is part of audio)
     spread_cents: float = 0.0  # detuned-unison spread found by the search (cfg.spread_grid)
+    # kits compared by tools.fit_with_tools, best first: {"kit", "loss", "n_hits", "audio"}, and what they were fitted to
+    drum_kits: list[dict] = field(default_factory=list)
+    drum_kits_on: str = ""
 
 
 def lead_settings() -> dict:

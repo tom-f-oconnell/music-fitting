@@ -155,3 +155,15 @@ kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; text-align: cente
 .data-text .hint { margin: 2px 0 0; overflow-wrap: anywhere; }
 .data-text .progress { margin-top: 5px; }
 .data-text .progress > div { height: 100%; background: var(--accent); }
+.kits { margin: 8px 0; }
+.kits-head { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+label.chip { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; color: var(--text); padding: 2px 8px; border: 1px solid var(--line); border-radius: 12px; font-size: 12px; cursor: pointer; user-select: none; }
+.chip input { margin: 0; }
+.chip.on { border-color: var(--accent); }
+label.check.compare { align-self: end; margin-bottom: 6px; }
+.kit-table { border-collapse: collapse; font-size: 12px; margin: 4px 0 12px; }
+.kit-table th, .kit-table td { padding: 3px 10px 3px 0; text-align: left; }
+.kit-table th { color: var(--muted); font-weight: 600; }
+.kit-table tr.used td:first-child::after { content: " · used"; color: var(--accent); }
+#kit-compare h3 { margin: 10px 0 2px; font-size: 12px; color: var(--muted); font-weight: 600; }

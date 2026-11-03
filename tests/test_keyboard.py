@@ -387,6 +387,13 @@ DRUMS_DESCRIBED = [{"name": name, "gm": gm, "kit": kit, "kits": ["808", "909"], 
                    for name, gm, kit in (("kick", 36, "808"), ("rim", 37, "909"), ("snare", 38, "909"))]
 
 
+DRUMKITS = {"default": ["808", "909"], "kits": [
+    {"id": "808", "name": "TR-808", "kind": "machine", "drums": ["kick", "snare"], "credit": "", "installed": True},
+    {"id": "909", "name": "TR-909", "kind": "machine", "drums": ["kick", "snare"], "credit": "", "installed": True},
+    {"id": "linndrum", "name": "LinnDrum (imitation)", "kind": "imitation", "drums": ["kick"], "credit": "", "installed": True},
+    {"id": "salamander", "name": "Salamander Drumkit", "kind": "recorded", "drums": [], "credit": "by someone", "installed": False}]}
+
+
 def _job(job_id, patches, notes, drum_hits):
     return {"id": job_id, "name": job_id, "kind": "upload", "status": "done", "stage": "", "step": 0, "total": 0, "progress": 1.0,
             "loss_curve": [], "error": None, "elapsed_s": 1.0, "created": 1.0, "started": 1.0, "finished": 2.0,
@@ -407,7 +414,7 @@ window.fetch = async (url, opts) => {
   if (path.endsWith(".wav") || path.endsWith("/render")) return new Response(wav.slice(), { status: 200, headers: { "X-Spectral-Loss": "1.0" } });
   if (path === "/api/midi") return new Response(new Uint8Array([77, 84, 104, 100]), { status: 200 });
   const job = path.match(/^\/api\/jobs\/(\w+)$/);
-  const reply = job ? jobs[job[1]] : { "/api/specs": %(specs)s, "/api/jobs": [], "/api/library": %(library)s }[path];
+  const reply = job ? jobs[job[1]] : { "/api/specs": %(specs)s, "/api/jobs": [], "/api/library": %(library)s, "/api/drumkits": %(drumkits)s }[path];
   if (reply !== undefined) return new Response(JSON.stringify(reply), { status: 200 });
   return realFetch(url, opts);
 };
@@ -416,8 +423,30 @@ location.hash = "job=both";
 ROLL_RUN = """
 (async () => {
   const until = async (test) => { for (let i = 0; i < 100 && !test(); i++) await new Promise((r) => setTimeout(r, 100)); };
-  await until(() => S.job && S.job.id === "both" && S.drumHits && document.querySelector("#roll").style.height);
+  await until(() => S.job && S.job.id === "both" && S.drumHits && document.querySelector("#roll").style.height && S.kits);
   const out = {};
+  // choosing kits
+  const chips = () => [...document.querySelectorAll("#kit-chips .chip")].map((c) => [c.textContent.trim(), c.querySelector("input").checked]);
+  const tick = (id, on) => { const cb = document.querySelector(`#kit-chips input[value="${id}"]`); cb.checked = on; cb.dispatchEvent(new Event("change")); };
+  const compare = (on) => { const cb = document.querySelector("#compare-kits"); cb.checked = on; cb.dispatchEvent(new Event("change")); };
+  out.kits = { chips: chips(), more: document.querySelector("#kit-chips button.link").textContent, value: document.querySelector("#drum-kit").value,
+               hint: document.querySelector("#kit-hint").textContent };
+  tick("noise", true); out.kits.mixedGeneric = [kitProblem(), document.querySelector("#kit-hint").textContent];
+  compare(true); out.kits.comparing = [kitProblem(), document.querySelector("#kit-hint").textContent, document.querySelector("#drum-kit").value];
+  tick("808", false); tick("909", false); out.kits.compareOne = kitProblem();
+  compare(false); tick("noise", false); out.kits.none = kitProblem();
+  tick("808", true); tick("909", true);
+  const mode = document.querySelector("#fit-mode");
+  mode.value = "notes"; mode.dispatchEvent(new Event("change")); out.kits.notesHidden = document.querySelector("#kit-wrap").hidden; out.kits.notesOk = kitProblem();
+  mode.value = "notes_and_drums"; mode.dispatchEvent(new Event("change"));
+  // the kits a fit compared
+  out.compared = { shown: !document.querySelector("#kit-compare").hidden, note: document.querySelector("#kit-compare-note").textContent,
+                   rows: [...document.querySelectorAll("#kit-compare-rows tr")].map((tr) => [tr.className, ...[...tr.children].slice(0, 3).map((td) => td.textContent)]) };
+  requests.length = 0;
+  document.querySelector("#kit-compare-rows tr:nth-child(2) button").click();
+  await until(() => S.play && S.play.which === "kit_1");
+  out.compared.playing = S.play && S.play.which;
+  stop();
   out.lanes = rollLanes().map((l) => [l.title, l.rows]);
   out.drumRows = rollLanes().find((l) => l.kind === "drums").kinds.map(drumLabel);
   out.metrics = document.querySelector("#metrics").textContent;
@@ -477,7 +506,10 @@ def roll_results(tmp_path_factory):
              {"pitch": 48.0, "onset": 0.5, "duration": 0.3, "velocity": 0.8, "voice": 1}]
     jobs = {"both": _job("both", [patch, patch], notes, [[0, 0.0, 0.9], [2, 0.5, 0.7], [0, 0.75, 0.8]]),
             "drums": _job("drums", [], [], [[0, 0.25, 0.9]])}
-    setup = ROLL_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(SPECS), "library": json.dumps(LIBRARY)}
+    jobs["both"]["result"].update(drum_kits=[{"kit": "808", "loss": 1.2345, "n_hits": 3, "audio": "kit_0"},
+                                             {"kit": "linndrum", "loss": 1.5, "n_hits": 5, "audio": "kit_1"}], drum_kits_on="drum stem")
+    setup = ROLL_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(SPECS), "library": json.dumps(LIBRARY),
+                         "drumkits": json.dumps(DRUMKITS)}
     html = html.replace('<script src="keyboard.js"></script>', f"<script>{setup}</script><script>{keyboard}</script>")
     html = html.replace('<script src="app.js"></script>', f"<script>{app}</script><script>{ROLL_RUN}</script>")
     return json.loads(_run_page_in_chrome(html, 1, tmp_path_factory.mktemp("chrome"))["/roll"])
@@ -487,8 +519,8 @@ def roll_results(tmp_path_factory):
 def test_each_voice_and_the_drums_get_a_lane(roll_results):
     r = roll_results
     assert [title for title, _ in r["lanes"]] == ["Voice 1", "Voice 2", "Drums"]
-    assert r["lanes"][2][1] == 2 and r["drumRows"] == ["kick (808)", "snare (909)"]  # only drums that were hit
-    assert "3 drum hits" in r["metrics"] and "kick (808) 2" in r["metrics"] and r["synthShown"]
+    assert r["lanes"][2][1] == 2 and r["drumRows"] == ["kick (TR-808)", "snare (TR-909)"]  # only drums that were hit
+    assert "3 drum hits" in r["metrics"] and "kick (TR-808) 2" in r["metrics"] and r["synthShown"]
 
 
 @needs_chrome
@@ -507,7 +539,7 @@ def test_drums_go_to_midi_by_general_midi_note(roll_results):
 def test_a_drums_only_job_has_only_the_drum_lane(roll_results):
     d = roll_results["drumsOnly"]
     assert d["lanes"] == ["Drums"] and d["synthHidden"] and d["playHidden"]
-    assert d["drumsShown"] and d["drumBoxes"] == ["kick (808)"]  # the mute and the sliders are with the drums
+    assert d["drumsShown"] and d["drumBoxes"] == ["kick (TR-808)"]  # the mute and the sliders are with the drums
 
 
 # ---- deleting jobs from the list
@@ -549,7 +581,7 @@ LIST_RUN = r"""
   Object.assign(out, { requests, confirms });
   // with Demucs installed, drums-only fits use it unless it was chosen by hand
   const form = document.querySelector("#upload-form").elements, mode = document.querySelector("#fit-mode");
-  const pick = (value) => { mode.value = value; mode.dispatchEvent(new Event("change")); return [form.separate.checked, form.voices.disabled, form.drum_kit.disabled]; };
+  const pick = (value) => { mode.value = value; mode.dispatchEvent(new Event("change")); return [form.separate.checked, form.voices.disabled, document.querySelector("#kit-wrap").hidden]; };
   out.modes = [pick("drums"), pick("notes"), pick("notes_and_drums")];
   form.separate.click();
   out.chosen = [pick("drums"), pick("notes")];
@@ -597,7 +629,7 @@ def test_the_cross_doesnt_open_the_job_and_closes_it_if_open(list_results):
 
 @needs_chrome
 def test_drums_only_fits_use_demucs_if_installed_unless_chosen_by_hand(list_results):
-    # [Demucs ticked, voices disabled, drum kit disabled] after choosing each fit mode
+    # [Demucs ticked, voices disabled, drum kits hidden] after choosing each fit mode
     assert list_results["modes"] == [[True, True, False], [False, False, True], [False, False, False]]
     assert list_results["chosen"] == [[True, True, False], [True, False, True]]  # ticked by hand: left alone
 
@@ -606,9 +638,29 @@ def test_drums_only_fits_use_demucs_if_installed_unless_chosen_by_hand(list_resu
 def test_drums_get_sliders_of_their_own(roll_results):
     r = roll_results
     assert r["drumCardShown"]
-    assert r["drumBoxes"] == [["kick (808)", ["kit", "level", "tune", "decay"]], ["snare (909)", ["kit", "level", "tune", "decay"]]]
+    assert r["drumBoxes"] == [["kick (TR-808)", ["kit", "level", "tune", "decay"]], ["snare (TR-909)", ["kit", "level", "tune", "decay"]]]
     sent = r["tweaked"]["sent"]
     assert sent[0]["kit"] == "909" and sent[0]["level"] == pytest.approx(0.01 * 200 ** 0.9, rel=1e-3) and sent[2] == {"level": 0.3, "tune": 0.0, "decay": -2.0, "kit": "909"}
-    assert r["tweaked"]["title"] == "kick (909)" and r["tweaked"]["lane"] == ["kick (909)", "snare (909)"]
-    assert r["reset"]["settings"][0] == {"level": 0.3, "tune": 0.0, "decay": -2.0, "kit": "808"} and r["reset"]["title"] == "kick (808)"
+    assert r["tweaked"]["title"] == "kick (TR-909)" and r["tweaked"]["lane"] == ["kick (TR-909)", "snare (TR-909)"]
+    assert r["reset"]["settings"][0] == {"level": 0.3, "tune": 0.0, "decay": -2.0, "kit": "808"} and r["reset"]["title"] == "kick (TR-808)"
     assert r["reset"]["muted"] == 0  # the snare muted earlier is back too
+
+
+
+@needs_chrome
+def test_kits_are_chosen_by_ticking_them(roll_results):
+    k = roll_results["kits"]
+    assert k["chips"] == [["TR-808", True], ["TR-909", True], ["LinnDrum", False], ["Generic sounds", False]]
+    assert "Salamander Drumkit" in k["more"] and k["value"] == "808,909" and "whichever" in k["hint"]
+    assert "compare them instead" in k["mixedGeneric"][0] and "compare them instead" in k["mixedGeneric"][1]
+    assert k["comparing"][0] == "" and "lowest loss" in k["comparing"][1] and k["comparing"][2] == "808,909,noise"
+    assert "at least two" in k["compareOne"] and "at least one" in k["none"]
+    assert k["notesHidden"] and k["notesOk"] == ""
+
+
+@needs_chrome
+def test_the_kits_compared_are_listed_best_first_and_can_be_heard(roll_results):
+    c = roll_results["compared"]
+    assert c["shown"] and "drum stem" in c["note"]
+    assert c["rows"] == [["used", "TR-808", "1.234", "3"], ["", "LinnDrum", "1.500", "5"]]
+    assert c["playing"] == "kit_1"

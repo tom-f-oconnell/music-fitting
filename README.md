@@ -26,13 +26,18 @@ Then open http://localhost:43153.
   demo fit** to fit a random synthetic melody whose true notes and patch are shown
   for comparison.
 * **Drums:** *Fit* chooses notes and drums (the default), notes only, or drums only.
-  Drums are fitted with TR-808 and TR-909 style kits (each drum takes whichever kit's
-  version fits better, then its level, tuning and decay are fitted), or with the
-  *generic* sounds the fit shapes itself, which find hits as well but don't say which
-  drum they are. Fitting notes and drums together favours the notes, so it finds
-  fewer drums than fitting drums only. With Demucs installed (below), drums-only fits
-  split the drums off first, which finds them far better, and ticking *Split off the
-  drums first* does the same for notes and drums.
+  Tick the *Drum kits* to fit with: drum machines made from scratch (TR-808, TR-909,
+  TR-606, CR-78, and imitations of the LinnDrum, Oberheim DMX and TR-707, which played
+  recordings that can't be shipped), recorded acoustic kits once downloaded from the
+  **Data** menu (Salamander, DRSKit), or the *generic* sounds the fit shapes itself,
+  which find hits but don't say which drum they are. With several ticked, each drum
+  plays whichever kit's version fits it best; with *Compare the kits*, each kit is
+  fitted to the drums on its own instead, the fit keeps the best, and the *Drums* box
+  lists how each did, to listen to. Hover over a kit to see what it has. Fitting notes
+  and drums together favours the notes, so it finds fewer drums than fitting drums
+  only. With Demucs installed (below), drums-only fits split the drums off first,
+  which finds them far better, and ticking *Split off the drums first* does the same
+  for notes and drums. The *Drums* example is a song's drums on their own.
 * **Listen and compare:** spectrograms of the original and the fit, a piano
   roll with a row of lanes for each voice and one for the drums (a row per drum
   that was hit), and playback of original / fit / your tweaked version, switching
@@ -53,7 +58,10 @@ Then open http://localhost:43153.
 * **Get more audio:** the **Data** menu downloads the datasets this was developed
   on, or similar ones: an artist's albums, a YouTube search or playlist, or a
   Zenodo record. Downloads are kept on disk, can be stopped and resumed, and appear
-  under *Audio*. Downloading copyrighted music is subject to YouTube's terms and
+  under *Audio*. It also downloads two freely licensed recorded drum kits, which then
+  appear among the *Drum kits*: the [Salamander Drumkit](https://archive.org/details/SalamanderDrumkit)
+  (CC BY-SA 3.0, 388 MB) and [DRSKit](https://drumgizmo.org/wiki/doku.php?id=kits:drskit)
+  (CC BY 4.0, 478 MB); credit them if you publish what you make with them. Downloading copyrighted music is subject to YouTube's terms and
   local law; this is for personal research use.
 * **Export:** patch JSON (re-importable), MIDI (drums on channel 10, as General
   MIDI drum notes), notes JSON, and the WAV.
@@ -91,10 +99,14 @@ alone), `notes.mid` (drums on channel 10), `notes.json` and `params.json` (patch
 the estimated tuning, the drums' kit, level, tuning and decay, and the drum hits).
 Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
 `--roll-steps`, `--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer
-spurious notes, lower if notes go missing), `--drum-kit` (default `808,909`: one
-or more of `808`, `909` and folders of your own samples, comma-separated, each file
-named after its drum, like `BD kick.wav`, `snare 2.wav`, `CH.wav`; or `noise` for
-the generic sounds), `--drums-only` (best with `--separate`), `--drum-kinds 0` (no drums; with `--drum-kit
+spurious notes, lower if notes go missing), `--drum-kit` (default as the web app: one
+or more of `808`, `909`, `606`, `cr78`, `linndrum`, `dmx`, `707`, a downloaded kit
+(`salamander`, `drskit`) or a folder of your own samples, comma-separated, each file
+named after its drum, like `BD kick.wav`, `snare 2.wav`, `CH.wav`, `ride.wav`, `tamb.wav`;
+a folder under `data/drumkits/` can be given by its name; or `noise` for the generic
+sounds), `--compare-kits` (fit each of those kits on its own and keep the best; writes
+`drum_kits.json` and each kit's drums as `kit_<kit>.wav`), `--drums-only` (best with
+`--separate`), `--drum-kinds 0` (no drums; with `--drum-kit
 noise`, how many sounds), `--noise-floor`, `--seed`, `--device` (`auto`,
 `cpu`, `cuda`, ...), `--lead` (for a mono lead or acid line: fit slides between
 notes, with 128 harmonics). With the optional helpers: `--basic-pitch` starts
@@ -128,9 +140,12 @@ the terminal shows the same for all requests; behind an SSH tunnel the address i
 HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
 `POST /api/jobs` (multipart: `file` or `track`, `offset`, `duration`, `voices`,
 `roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,
-`full_memory`, `fit_mode` (`notes_and_drums`, `notes`, `drums`), `drum_kit` (`808,909`, `808`,
-`909`, `noise`; a folder of samples only from the command line), `separate`, `basic_pitch`; the
-last two only if `tools` in `/api/specs` says they are installed),
+`full_memory`, `fit_mode` (`notes_and_drums`, `notes`, `drums`), `drum_kit` (comma-separated ids
+of installed kits from `GET /api/drumkits`, or `noise`; never a path), `compare_kits`, `separate`,
+`basic_pitch`; the last two only if `tools` in `/api/specs` says they are installed; a job that
+compared kits lists them best first in its result's `drum_kits`, with their drums at
+`GET /api/jobs/{id}/audio/kit_<n>.wav`), `GET /api/drumkits` (every kit, whether it's installed,
+and the default),
 `POST /api/jobs/demo`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `GET /api/library` (cached tracks and downloads), `GET /api/library/audio?track=`,
 `POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
@@ -167,7 +182,7 @@ terms and local law; this is for personal research use.
 musicfit/
   synth.py        differentiable subtractive synth (PyTorch)
   drums.py        drum voices (a kit's drums, or generic sounds) from an onset roll, noise floor
-  drumkit.py      808 and 909 style kits made from scratch, kits from folders of samples
+  drumkit.py      drum machines made from scratch, imitations of sample-based ones, kits from folders of samples
   notes.py        soft piano roll, explicit note list, MIDI writer
   loss.py         multi-resolution STFT loss, expected spectrum of a detuned unison
   tuning.py       the recording's offset from A440
@@ -178,7 +193,7 @@ musicfit/
   synthetic.py    synthetic targets with known notes: random melodies, 303-style lines
   slakh.py        BabySlakh clips with their true notes
   web/            FastAPI app (app.py), background jobs and downloads (jobs.py, downloads.py), fast re-render (render.py), request log (request_log.py), static/ UI (keyboard.js: the live synth)
-  dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py), cached data and Zenodo (library.py), example clips
+  dataset/        MusicBrainz catalogue + title matching (catalog.py), curated Aphex Twin list, yt-dlp pipeline (youtube.py), cached data and Zenodo (library.py), recorded drum kits (drumkits.py), example clips
 scripts/          fit_audio.py, demo_fit_synthetic.py, eval_synthetic.py, eval_slakh.py, build_aphex_twin_dataset.py, make_examples.py
 tests/
 ```

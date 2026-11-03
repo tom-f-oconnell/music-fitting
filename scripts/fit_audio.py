@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import torch  # noqa: E402
 
 from musicfit.audio_io import load_audio, save_audio  # noqa: E402
+from musicfit.dataset.drumkits import default_kits  # noqa: E402
 from musicfit.fit import FitConfig, fit, lead_settings  # noqa: E402
 from musicfit.notes import write_midi  # noqa: E402
 
@@ -37,9 +38,13 @@ def main():
     ap.add_argument("--sparsity", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--drum-kinds", type=int, default=3, help="0 for no drums (with --drum-kit noise: how many kinds)")
-    ap.add_argument("--drum-kit", default="808,909",
-                    help="kits to fit drums against, comma-separated: 808, 909, or a folder of samples named after "
-                         "their drums (kick.wav, snare.wav, ...); each drum keeps the best fit. noise: generic noise bursts")
+    ap.add_argument("--drum-kit", default=None,
+                    help="kits to fit drums against, comma-separated: 808, 909, 606, cr78, linndrum, dmx, 707, a downloaded kit "
+                         "(salamander, drskit), or a folder of samples named after their drums (kick.wav, snare.wav, ...); "
+                         "each drum keeps the best fit. noise: generic noise bursts. Default: as the web app")
+    ap.add_argument("--compare-kits", action="store_true",
+                    help="fit the drums alone with each kit of --drum-kit in turn (Demucs's drum stem if installed), keep the "
+                         "best, and write how each did (drum_kits.json, kit_<kit>.wav)")
     ap.add_argument("--drums-only", action="store_true", help="fit only the drums (with --separate, to Demucs's drum stem)")
     ap.add_argument("--noise-floor", action="store_true", help="also fit a stationary noise floor")
     ap.add_argument("--lead", action="store_true",
@@ -55,14 +60,15 @@ def main():
 
     target = load_audio(args.audio, args.sr, args.offset, args.duration)
     target = target / (target.abs().max() + 1e-8) * 0.5
-    cfg = FitConfig(sr=args.sr, n_voices=0 if args.drums_only else args.voices, drum_kit=args.drum_kit, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
+    kits = args.drum_kit or ",".join(default_kits())
+    cfg = FitConfig(sr=args.sr, n_voices=0 if args.drums_only else args.voices, drum_kit=kits, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
                     roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed,
                     drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device, memory_mode=args.memory_mode,
                     **(lead_settings() if args.lead else {}))
-    if args.separate or args.basic_pitch:
+    if args.separate or args.basic_pitch or args.compare_kits:
         from musicfit.tools import fit_with_tools
 
-        res = fit_with_tools(target, cfg, args.separate, args.basic_pitch)
+        res = fit_with_tools(target, cfg, args.separate, args.basic_pitch, compare_kits=kits.split(",") if args.compare_kits else None)
     else:
         res = fit(target, cfg)
 
@@ -82,6 +88,13 @@ def main():
                    "drums": res.noise.describe() if res.noise is not None else [],
                    "drum_hits": [{"drum": names[k], "gm": gm[k], "time": round(t, 3), "strength": round(v, 3)} for k, t, v in hits],
                    "history": res.history}, f, indent=2)
+    if res.drum_kits:
+        for k in res.drum_kits:
+            save_audio(os.path.join(args.out, f"kit_{k['kit'].replace(',', '+')}.wav"), k["audio"], args.sr)
+            print(f"  {k['kit']:24s} loss {k['loss']:.3f}, {k['n_hits']} hits")
+        with open(os.path.join(args.out, "drum_kits.json"), "w") as f:
+            json.dump({"fitted_to": res.drum_kits_on, "kits": [{k: v for k, v in x.items() if k != "audio"} for x in res.drum_kits]}, f, indent=2)
+        print(f"kits compared on the {res.drum_kits_on}; kept {res.drum_kits[0]['kit']}")
     print(f"wrote {len(res.notes)} notes, {len(hits)} drum hits and {len(res.synths)} patches to {args.out}")
 
 

@@ -39,6 +39,7 @@ class Job:
     finished: float | None = None  # when it ended, however it ended
     status: str = "queued"  # queued | running | done | failed | cancelled
     stage: str = ""
+    detail: str = ""  # e.g. which kit is being tried
     step: int = 0
     total: int = 0
     progress: float = 0.0  # 0..1 over both stages
@@ -200,8 +201,10 @@ class JobManager:
         def progress(info: dict) -> None:
             if job.id in self._cancel:
                 raise Cancelled()
-            if info["stage"] == "drums":  # a separate short fit after the notes, not on the loss chart
+            if info["stage"] in ("drums", "kits"):  # separate short fits, not on the loss chart
                 job.stage, job.step, job.total = info["stage"], info["step"], info["total"]
+                if info["stage"] == "kits":
+                    job.detail = f"kit {info['kit_index'] + 1} of {info['n_kits']}: {info['kit']}"
                 return
             offset = 0 if info["stage"] == "roll" else cfg.roll_steps + 1
             g = offset + info["step"]
@@ -226,9 +229,9 @@ class JobManager:
                 target = target / (target.abs().max() + 1e-8) * 0.5
             save_audio(os.path.join(d, "target.wav"), target, cfg.sr)
 
-            if c.get("separate") or c.get("basic_pitch"):
-                res = fit_with_tools(target, cfg, bool(c.get("separate")), bool(c.get("basic_pitch")),
-                                     verbose=False, progress=progress)
+            if c.get("separate") or c.get("basic_pitch") or c.get("compare_kits"):
+                res = fit_with_tools(target, cfg, bool(c.get("separate")), bool(c.get("basic_pitch")), verbose=False,
+                                     progress=progress, compare_kits=cfg.drum_kit.split(",") if c.get("compare_kits") else None)
             else:
                 res = fit(target, cfg, verbose=False, progress=progress)
 
@@ -238,6 +241,8 @@ class JobManager:
                     noise = res.noise.render(int(target.numel())).cpu()
                 sf.write(os.path.join(d, "noise.wav"), noise.numpy(), cfg.sr, subtype="FLOAT")
                 res.noise.cpu().save(os.path.join(d, "drums.pt"))  # to play edited hits later
+            for i, k in enumerate(res.drum_kits):  # each kit's drums, to listen to
+                save_audio(os.path.join(d, f"kit_{i}.wav"), k["audio"], cfg.sr)
             if job.kind == "demo":
                 reference = {
                     "patch": true_params.describe(),
@@ -257,6 +262,10 @@ class JobManager:
                 "has_noise": res.noise is not None,
                 "drum_hits": [[k, round(t, 3), round(v, 3)] for k, t, v in res.noise.hits()] if res.noise else [],
                 "drums": res.noise.describe() if res.noise else [],  # name, General MIDI note and kit of each kind
+                # kits compared, best first, with their fitted drums as kit_<i>.wav, and what they were fitted to
+                "drum_kits": [{"kit": k["kit"], "loss": round(k["loss"], 5), "n_hits": k["n_hits"], "audio": f"kit_{i}"}
+                              for i, k in enumerate(res.drum_kits)],
+                "drum_kits_on": res.drum_kits_on,
                 "history": res.history,
                 "reference": reference,
             }
