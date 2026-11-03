@@ -57,7 +57,10 @@ class FitConfig:
     # each drum keeps whichever fits it best. "noise": generic noise bursts instead (the drum voice before kits)
     drum_kit: str = "808,909"
     noise_floor: bool = False
-    drum_sparsity: float = 0.2  # multiplies `sparsity` for the drum roll (higher: fewer, stronger hits)
+    # multiplies `sparsity` for the drum roll (higher: fewer, stronger hits). Alongside notes, cheap drums take
+    # over pitched sound (design.md); fitted alone (no voices, as in a Demucs drum stem) they can be cheaper
+    drum_sparsity: float = 1.0
+    drum_sparsity_alone: float = 0.2
     drum_threshold: float = 0.3  # how strong a peak of the drum roll has to be to count as a hit
     drum_start: float = 0.25  # fraction of roll_steps before the drums join (pitched content first; see design.md)
     # stage 2; a faster onset rate drifts notes off the onsets stage 1 found (design.md)
@@ -291,7 +294,8 @@ def fit(
         noise = NoiseVoice(n_frames, cfg.frame_hop_s, cfg.sr, cfg.drum_kinds, noise_floor=cfg.noise_floor,
                            generator=gen, seed=cfg.seed).to(device)
     render_noise = (lambda: noise.render(T)) if noise is not None else (lambda: 0.0)
-    noise_mass = (lambda: cfg.drum_sparsity * noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
+    drum_cost = cfg.drum_sparsity if cfg.n_voices else cfg.drum_sparsity_alone
+    noise_mass = (lambda: drum_cost * noise.strengths().sum(0).mean()) if noise is not None else (lambda: 0.0)
 
     spread = 0.0
     spread_steps = {cfg.roll_steps // 4, cfg.roll_steps // 2, 3 * cfg.roll_steps // 4}

@@ -527,6 +527,12 @@ LIST_RUN = r"""
   out.selected = { selected: S.jobId, viewHidden: document.querySelector("#job-view").hidden, hash: location.hash,
                    list: document.querySelector("#jobs").textContent };
   Object.assign(out, { requests, confirms });
+  // with Demucs installed, drums-only fits use it unless it was chosen by hand
+  const form = document.querySelector("#upload-form").elements, mode = document.querySelector("#fit-mode");
+  const pick = (value) => { mode.value = value; mode.dispatchEvent(new Event("change")); return [form.separate.checked, form.voices.disabled, form.drum_kit.disabled]; };
+  out.modes = [pick("drums"), pick("notes"), pick("notes_and_drums")];
+  form.separate.click();
+  out.chosen = [pick("drums"), pick("notes")];
   await realFetch("/jobs", { method: "POST", body: JSON.stringify(out) });
 })().catch((e) => realFetch("/error", { method: "POST", body: String(e) + " " + e.stack }));
 """
@@ -545,7 +551,8 @@ def list_results(tmp_path_factory):
     notes = [{"pitch": 60.0, "onset": 0.1, "duration": 0.3, "velocity": 0.8, "voice": 0}]
     running = {**_job("run1", [], [], []), "status": "running", "progress": 0.4, "finished": None, "result": None}
     jobs = {"run1": running, "done1": _job("done1", [patch], notes, [])}
-    setup = LIST_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(SPECS), "library": json.dumps(LIBRARY)}
+    specs = {**SPECS, "tools": {"demucs": True, "basic_pitch": False}}
+    setup = LIST_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(specs), "library": json.dumps(LIBRARY)}
     html = html.replace('<script src="keyboard.js"></script>', f"<script>{setup}</script><script>{keyboard}</script>")
     html = html.replace('<script src="app.js"></script>', f"<script>{app}</script><script>{LIST_RUN}</script>")
     return json.loads(_run_page_in_chrome(html, 1, tmp_path_factory.mktemp("chrome"))["/jobs"])
@@ -566,3 +573,10 @@ def test_the_cross_doesnt_open_the_job_and_closes_it_if_open(list_results):
     assert r["running"] == {"names": ["done1"], "selected": "done1", "shown": True}
     assert r["selected"]["selected"] is None and r["selected"]["viewHidden"] and r["selected"]["hash"] == ""
     assert "No jobs yet" in r["selected"]["list"]
+
+
+@needs_chrome
+def test_drums_only_fits_use_demucs_if_installed_unless_chosen_by_hand(list_results):
+    # [Demucs ticked, voices disabled, drum kit disabled] after choosing each fit mode
+    assert list_results["modes"] == [[True, True, False], [False, False, True], [False, False, False]]
+    assert list_results["chosen"] == [[True, True, False], [True, False, True]]  # ticked by hand: left alone

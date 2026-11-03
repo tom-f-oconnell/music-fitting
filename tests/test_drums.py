@@ -114,7 +114,7 @@ def test_a_drums_only_fit_finds_the_hits_and_the_kit():
     # hit cost suits real drums, which no kit here matches exactly; with an exact match, a higher
     # one finds just the true hits (design.md).
     res = fit(target, FitConfig(n_voices=0, roll_steps=200, note_steps=60, polish_steps=0, device="cpu", tuning_cents=0.0,
-                                log_every=1000, seed=1, drum_sparsity=5.0), verbose=False)
+                                log_every=1000, seed=1, drum_sparsity_alone=5.0), verbose=False)
     names = res.noise.names
     hits = {(names[k], round(t, 1)) for k, t, v in res.noise.hits() if v > 0.3}
     assert {("kick", 0.2), ("kick", 0.7), ("snare", 0.4) if ("snare", 0.4) in hits else ("snare", 0.5)} <= hits

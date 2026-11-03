@@ -29,7 +29,10 @@ Then open http://localhost:43153.
   Drums are fitted with TR-808 and TR-909 style kits (each drum takes whichever kit's
   version fits better, then its level, tuning and decay are fitted), or with the
   *generic* sounds the fit shapes itself, which find hits as well but don't say which
-  drum they are.
+  drum they are. Fitting notes and drums together favours the notes, so it finds
+  fewer drums than fitting drums only. With Demucs installed (below), drums-only fits
+  split the drums off first, which finds them far better, and ticking *Split off the
+  drums first* does the same for notes and drums.
 * **Listen and compare:** spectrograms of the original and the fit, a piano
   roll with a row of lanes for each voice and one for the drums (a row per drum
   that was hit), and playback of original / fit / your tweaked version, switching
@@ -89,7 +92,7 @@ Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
 spurious notes, lower if notes go missing), `--drum-kit` (default `808,909`: one
 or more of `808`, `909` and folders of your own samples, comma-separated, each file
 named after its drum, like `BD kick.wav`, `snare 2.wav`, `CH.wav`; or `noise` for
-the generic sounds), `--drums-only`, `--drum-kinds 0` (no drums; with `--drum-kit
+the generic sounds), `--drums-only` (best with `--separate`), `--drum-kinds 0` (no drums; with `--drum-kit
 noise`, how many sounds), `--noise-floor`, `--seed`, `--device` (`auto`,
 `cpu`, `cuda`, ...), `--lead` (for a mono lead or acid line: fit slides between
 notes, with 128 harmonics). With the optional helpers: `--basic-pitch` starts

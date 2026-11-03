@@ -488,7 +488,8 @@ Optional, in `requirements-tools.txt`; nothing imports them until they are used.
   transcription (+0.020 ± 0.006, or +0.029 ± 0.007 with the fit), and does little for
   the fit alone (+0.011 ± 0.008). The price is a higher loss against the mix (+0.169 ±
   0.041 with basic-pitch, +0.650 ± 0.169 without), since the two parts can't make up for
-  each other's errors, and each runs one more model. Off unless asked for.
+  each other's errors, and each runs one more model. Off unless asked for, except for
+  drums-only fits in the web app, where it finds drums far better (see "Drums").
 
 Real clips, current code, 2 voices, single runs (loss, notes, drums' share of the output):
 
@@ -498,6 +499,99 @@ Real clips, current code, 2 voices, single runs (loss, notes, drums' share of th
 | Cornish Acid | 1.745, 17, 55 % | 1.700, 21, 48 % | 1.607, 1, 96 % | 1.573, 20, 68 % | 1.654, 22, 68 % | 1.654, 27, 76 % |
 | produk 29 | 1.718, 16, 0 % | 1.716, 20, 4 % | 1.538, 6, 74 % | 1.446, 23, 82 % | 1.742, 12, 32 % | 1.790, 24, 58 % |
 | Radiator | 1.739, 3, 1 % | 1.794, 2, 1 % | 1.783, 2, 3 % | 1.256, 32, 0 % | 1.926, 4, 0 % | 1.393, 33, 0 % |
+
+(Those runs used the generic drum voice; the kits came later, see "Drums".)
+
+### Drums (`drumkit.py`, `drums.py`)
+
+The drum voice above is anonymous: kinds of shaped noise and swept sine, whatever the fit
+makes of them (`NoiseVoice`, still there as `drum_kit="noise"`). The default (`KitVoice`)
+plays named drums from drum machine kits, so hits can be played back, edited, and exported as
+General MIDI drums.
+
+* **Kits.** `drumkit.py` makes TR-808 and TR-909 style kits from what is known of the
+  circuits: pitch-swept decaying sines for kicks and toms, the 808's six square waves at fixed
+  inharmonic frequencies for its hats, cymbal and cowbell, filtered noise for snares and noise
+  bursts for claps. Nothing has to be downloaded or licensed, but they aren't recordings, so
+  even a real 808 won't match exactly. A folder of samples named after their drums is a kit too.
+* **A kit per drum.** While the roll is fitted, each drum is a softmax mix of the kits'
+  versions, so gradients can choose; before stage 2, `commit()` keeps the heavier one. Each
+  drum also gets a level, a tuning (±12 semitones, by reading the sample at a continuous rate,
+  so it has a gradient) and a change of decay.
+* **One hit per group.** The fit often builds one real snare from its snare, clap and rim at
+  once. Hits keep only the strongest drum of each group (kick; snare, rim and clap; hats; toms;
+  cymbal; cowbell) within 50 ms: on the stems below, F1 0.481 → 0.557 and the snare's 0.36 →
+  0.59. The fitted audio keeps every layer; replayed hits lose the weaker ones.
+
+**Scoring** (`eval_slakh.py --drums`, `slakh.score_drums`). Hits match true hits one to one
+within 50 ms, ignoring the drum ("any") or requiring its group ("grouped"). The generic voice's
+kinds have no names, so each is named after the group most of its matched hits belong to; that
+uses the answer and flatters its grouped score. BabySlakh's drums are dense and not all drum
+machine sounds: the 20 usual 4 s windows hold 521 hits, 172 of them hats, 91 kicks, 68 snares,
+52 cymbals (mostly rides), 3 toms and 135 other percussion (tambourine, cabasa, bongos, ...)
+that no kit here has. So "any" is generous: the fitted hits moved to random times still score
+0.27.
+
+On the **true drum stems** (`--drum-stem`, perfect separation), the 20 windows:
+
+| | any | grouped | kick | snare | hat |
+|---|---|---|---|---|---|
+| kits, hit cost 5 (the old default) | 0.26 | 0.16 | 0.57 | 0.21 | 0.00 |
+| kits, hit cost 1 | 0.48 | 0.29 | 0.87 | 0.43 | 0.08 |
+| **kits, hit cost 0.2** (the default for drums alone) | 0.567 | 0.401 | 0.84 | 0.55 | 0.41 |
+| the same hits at random times | 0.27 | 0.10 | 0.12 | 0.09 | 0.15 |
+| generic voice, hit cost 0.2 | 0.489 | 0.407 | 0.65 | 0.68 | 0.27 |
+
+The hit cost (`drum_sparsity_alone`, a multiple of `sparsity`) and the 50 ms were chosen on these
+windows, so they were checked on 47 others (`--clips-per-track 3`, less these): cost 0.2 scores
+0.548 / 0.366, cost 1 0.456 / 0.284, the generic voice 0.469 / 0.384. Paired on the 20, the
+kits find more hits than the generic voice (+0.070 ± 0.029), more kicks (+0.20 ± 0.07) and hats
+(+0.19 ± 0.06), and name them, at the same grouped F1 (−0.017 ± 0.026) though the generic
+voice's names come from the answer.
+
+The low cost is worse when the target *is* the kit: a kick, snare and kick taken from it come
+back as 21 hits, the snare as a clap, at a higher loss than cost 5 (0.835 against 0.728),
+which finds just the three. Real drums never match that well (the test of this case sets 5).
+
+What fails is toms and cymbals. The fit plays toms that aren't there (118 against 3, and 353
+against 19 on the other windows), mostly at real hits of other drums: a kit without toms
+loses more ("any" 0.548 → 0.472, hats 0.31 → 0.19) than it gains (grouped 0.366 → 0.394), so
+they stay, and a folder kit is the way to leave them out. Rides count as cymbals, and the only
+cymbal here is a crash: F1 0.08.
+
+**Demucs** helps drums, unlike notes. Drums alone (`n_voices=0`), the 20 windows:
+
+| drums fitted to | any | grouped | kick | snare | hat | time per fit |
+|---|---|---|---|---|---|---|
+| the mix | 0.470 | 0.240 | 0.60 | 0.38 | 0.27 | 25 s |
+| Demucs's drum stem | 0.579 | 0.337 | 0.84 | 0.67 | 0.15 | 67 s |
+| the true drum stem | 0.567 | 0.401 | 0.84 | 0.55 | 0.41 | 26 s |
+
+Against the mix: grouped +0.093 ± 0.029 (better on 15 of 19), kicks +0.24 ± 0.06, snares
++0.21 ± 0.09, but hats −0.14 ± 0.08. It nearly matches perfect separation, except that it
+leaves most hats in the other stems (at 16 kHz a hat is little more than its lowest octave).
+So the web app ticks Demucs for drums-only fits when it is installed.
+
+**Alongside notes** (2 voices; drums join at `drum_start` 0.25 as before) cheap drums take
+over again. In the mix, kits at cost 0.2 find drums where the old voice found 1 hit of 521
+(any 0.301, grouped 0.202), but on real clips they cut Cornish Acid from 21 notes to 10 and 6
+(two seeds), with drums making 79–90 % of the output. Single runs (loss, notes, drums' share):
+
+| clip | old voice, cost 5 | kits, cost 5 | **kits, cost 1** | kits, cost 0.2 (two seeds) | kits, Demucs |
+|---|---|---|---|---|---|
+| aisatsana | 1.138, 10, 2 % | 1.145, 11, 2 % | 1.128, 11, 3 % | 1.157 / 1.137, 10 / 8, 2 / 3 % | 1.371, 10, 0 % |
+| Cornish Acid | 1.677, 21, 58 % | 1.919, 20, 50 % | 1.681, 21, 62 % | 1.661 / 1.684, 10 / 6, 79 / 90 % | 1.676, 22, 73 % |
+| produk 29 | 1.741, 15, 12 % | 1.798, 17, 9 % | 1.662, 9, 75 % | 1.613 / 1.638, 9 / 12, 40 / 26 % | 1.807, 13, 32 % |
+| Radiator | 1.683, 1, 0 % | 1.839, 3, 16 % | 1.679, 3, 3 % | 1.784 / 1.764, 1 / 1, 4 % | 1.948, 2, 0 % |
+
+On the 20 mixes it is a trade between the two: at cost 1, note F1 0.084 (+0.024 ± 0.008
+against cost 0.2, +0.017 ± 0.008 against the old voice) but drums 0.133 / 0.089 (grouped
+−0.122 ± 0.034 against cost 0.2). Notes are what the fitter is for, and losing them is the
+worse failure, so with notes the cost is 1 (`drum_sparsity`), and 0.2 only when the drums are
+fitted alone (`drum_sparsity_alone`: no voices, which includes the Demucs drum stem). Good drums
+alongside notes take Demucs: drums as in its table above (grouped +0.128 ± 0.038 against the
+kits at 0.2 in the mix), notes fitted to the pitched stems without drums as in "Pretrained
+tools", for a higher loss against the mix. That stays a choice for notes and drums.
 
 ### Next
 
@@ -632,8 +726,9 @@ members that land outside the destination. There is deliberately no delete butto
 * Real instruments fit worse in longer clips (see "Memory and long clips").
 * On dense music the fitter alone finds few notes; basic-pitch's notes fix that
   but all go to one voice (see "Pretrained tools").
-* Drum hits are fitted but only exported as a list (`params.json`, the web
-  job's `drum_hits`), not as MIDI; the web app has no sliders for them.
+* Drums: the kits are synthesised, so real drums are matched only roughly; toms are found
+  where there are none, rides and other percussion aren't in the kits, and Demucs loses most
+  hats (see "Drums"). The web app has no sliders for a drum's level, tuning or decay.
 * Echoes are still partly explained as notes (see above); the delay effect
   needs a better way back once it has been turned down.
 * High-resonance patches are fitted badly.

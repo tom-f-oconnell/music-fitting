@@ -951,7 +951,15 @@ function wire() {
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); file.files = e.dataTransfer.files; showFile(); };
 
   // drums-only fits have no voices to count
-  $("#fit-mode").onchange = (e) => { $("#upload-form").elements.voices.disabled = e.target.value === "drums"; };
+  // Drums alone are found far better in Demucs's drum stem (design.md), so it's ticked for them unless chosen by hand
+  const separate = $("#upload-form").elements.separate;
+  separate.addEventListener("change", () => { separate.dataset.chosen = "1"; });
+  $("#fit-mode").onchange = (e) => {
+    const mode = e.target.value, form = $("#upload-form").elements;
+    form.voices.disabled = mode === "drums";
+    form.drum_kit.disabled = mode === "notes";
+    if (S.specs && S.specs.tools.demucs && !separate.dataset.chosen) separate.checked = mode === "drums";
+  };
   $("#upload-form").onsubmit = async (e) => {
     e.preventDefault();
     const chosen = !!$("#track").value;
