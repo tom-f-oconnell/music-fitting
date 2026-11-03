@@ -556,6 +556,9 @@ Blackbox "omc" mixes, which are only on YouTube as slowed fan edits.
 Single process. `jobs.py` runs one fit at a time on a worker thread (a fit
 saturates the GPU or all CPU cores) and persists each job as `job.json` + WAVs;
 jobs that were running when the server stopped are marked failed on restart.
+Deleting a running job drops it from the list and removes its `job.json` at once (so a
+restart can't bring it back), stops the fit at its next step, and removes the rest of its
+files once it has, rather than pulling them from under a fit that is still writing.
 `render.py` re-renders an edited patch / note list without gradients on the
 CPU for the sliders (well under a second for a few seconds of audio), so
 re-renders compete with a CPU fit but not a GPU one. The frontend is plain JS

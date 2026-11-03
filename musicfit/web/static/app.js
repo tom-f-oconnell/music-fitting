@@ -128,13 +128,33 @@ async function refreshJobs() {
     const li = document.createElement("li");
     li.className = "job" + (j.id === S.jobId ? " active" : "");
     const pct = j.status === "running" ? ` ${Math.round(j.progress * 100)}%` : "";
-    li.innerHTML = `<div class="jmain"><span class="jname"></span><span class="badge ${j.status}">${j.status}${pct}</span></div><div class="jwhen"></div>`;
+    li.innerHTML = `<div class="jmain"><span class="jname"></span><span class="badge ${j.status}">${j.status}${pct}</span>` +
+                   `<button class="jdel" type="button">×</button></div><div class="jwhen"></div>`;
     li.querySelector(".jname").textContent = j.name;
     li.querySelector(".jwhen").textContent = jobWhen(j);
     li.title = jobTimes(j);
     li.onclick = () => selectJob(j.id);
+    const del = li.querySelector(".jdel");
+    del.title = jobActive(j) ? "Stop and delete this job" : "Delete this job";
+    del.setAttribute("aria-label", del.title);
+    del.onclick = (ev) => { ev.stopPropagation(); deleteJob(j); };
     ul.appendChild(li);
   }
+}
+
+const jobActive = (j) => j.status === "queued" || j.status === "running";
+
+async function deleteJob(j) {
+  const what = jobActive(j) ? `Stop and delete “${j.name}”?` : `Delete “${j.name}” and its results?`;
+  if (!confirm(what)) return;
+  try { await api(`/api/jobs/${j.id}`, { method: "DELETE" }); } catch (e) { alert(e.message); }
+  if (S.jobId === j.id) {
+    stop();
+    clearTimeout(S.pollTimer);
+    S.jobId = null; S.job = null; location.hash = "";
+    $("#job-view").hidden = true; $("#empty").hidden = false;
+  }
+  refreshJobs();
 }
 
 async function selectJob(id) {
@@ -175,7 +195,7 @@ function showJobHead(job) {
   st.className = "badge " + job.status;
   st.textContent = job.status;
   $("#job-times").textContent = jobTimes(job);
-  const active = job.status === "queued" || job.status === "running";
+  const active = jobActive(job);
   $("#cancel-btn").hidden = !active;
   $("#delete-btn").hidden = active;
   $("#progress-wrap").hidden = !active;
@@ -964,14 +984,7 @@ function wire() {
   };
 
   $("#cancel-btn").onclick = async () => { await api(`/api/jobs/${S.jobId}/cancel`, { method: "POST" }); poll(); };
-  $("#delete-btn").onclick = async () => {
-    if (!confirm("Delete this job and its results?")) return;
-    await api(`/api/jobs/${S.jobId}`, { method: "DELETE" });
-    stop();
-    S.jobId = null; S.job = null; location.hash = "";
-    $("#job-view").hidden = true; $("#empty").hidden = false;
-    refreshJobs();
-  };
+  $("#delete-btn").onclick = () => S.job && deleteJob(S.job);
 
   document.querySelectorAll("[data-play]").forEach((b) => (b.onclick = () => {
     const t = S.play ? playheadTime() : 0;   // A/B: switching keeps the position

@@ -52,6 +52,8 @@ Then open http://localhost:43153.
   local law; this is for personal research use.
 * **Export:** patch JSON (re-importable), MIDI (drums on channel 10, as General
   MIDI drum notes), notes JSON, and the WAV.
+* **Jobs:** every fit is kept in the *Jobs* list until you delete it with its ×,
+  which also stops it if it's still running.
 
 It works best on short, sparse synth lines. On its own it finds few of the
 notes in busy music, so for anything dense install the two optional helpers
@@ -128,7 +130,7 @@ last two only if `tools` in `/api/specs` says they are installed),
 `GET /api/library` (cached tracks and downloads), `GET /api/library/audio?track=`,
 `POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
 `POST /api/library/downloads/{id}/cancel`,
-`DELETE /api/jobs/{id}`, `GET /api/jobs/{id}/audio/{target|fit}.wav`,
+`DELETE /api/jobs/{id}` (stops it first if it's queued or running), `GET /api/jobs/{id}/audio/{target|fit}.wav`,
 `POST /api/jobs/{id}/render` (`{patches, notes, muted_voices, drum_hits}` → WAV, loss in
 the `X-Spectral-Loss` header; `drum_hits` as `[drum index, time, strength]`), `POST /api/midi`
 (`{notes, drum_hits}` → .mid, `drum_hits` as `[General MIDI note, time, strength]`).

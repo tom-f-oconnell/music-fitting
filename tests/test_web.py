@@ -145,6 +145,44 @@ def test_times_survive_a_restart_and_a_cancelled_job_never_started(tmp_path):
     assert (again.started, again.finished) == (None, job.finished)
 
 
+def test_jobs_can_be_deleted_while_queued_or_running(client, tmp_path, monkeypatch):
+    """Deleting stops a running fit and skips a queued one; their files go, and the next job still runs."""
+    import threading
+
+    from musicfit.web import jobs as jobs_module
+
+    release, started = threading.Event(), threading.Event()
+    real_fit = jobs_module.fit
+
+    def slow_fit(target, cfg, verbose=False, progress=None):
+        started.set()
+        while not release.is_set():  # a fit that only stops when told to
+            progress({"stage": "roll", "step": 0, "total": 1, "loss": 1.0})
+            time.sleep(0.01)
+        return real_fit(target, cfg, verbose, progress)
+
+    monkeypatch.setattr("musicfit.web.jobs.fit", slow_fit)
+    demo = {"seed": 1, "length": 1.0, "notes": 2, "roll_steps": 4, "note_steps": 2}
+    running = client.post("/api/jobs/demo", json=demo).json()["id"]
+    assert started.wait(60)
+    queued = client.post("/api/jobs/demo", json=demo).json()["id"]
+    jobs_dir = tmp_path / "jobs"
+    assert client.delete(f"/api/jobs/{queued}").status_code == 200
+    assert not (jobs_dir / queued).exists()
+    assert client.delete(f"/api/jobs/{running}").status_code == 200
+    assert client.get(f"/api/jobs/{running}").status_code == 404 and client.delete(f"/api/jobs/{running}").status_code == 404
+    assert not (jobs_dir / running / "job.json").exists()  # a restart now wouldn't list it
+    t0 = time.time()
+    while (jobs_dir / running).exists() and time.time() - t0 < 30:
+        time.sleep(0.05)
+    assert not (jobs_dir / running).exists()  # the fit stopped and its files went
+    assert client.get("/api/jobs").json() == []
+
+    release.set()
+    after = _wait(client, client.post("/api/jobs/demo", json=demo).json()["id"])
+    assert after["status"] == "done", after["error"]
+
+
 def test_upload_job(client, tmp_path):
     sr = 16000
     t = np.arange(int(0.8 * sr)) / sr

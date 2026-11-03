@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import gc
+import contextlib
 import json
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -61,6 +63,7 @@ class JobManager:
         os.makedirs(root, exist_ok=True)
         self.jobs: dict[str, Job] = {}
         self._cancel: set[str] = set()
+        self._deleted: set[str] = set()  # deleted while running: remove the files when the fit stops
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=1)
         self._load_existing()
@@ -71,6 +74,8 @@ class JobManager:
         return os.path.join(self.root, job_id)
 
     def _save(self, job: Job) -> None:
+        if job.id in self._deleted:
+            return
         tmp = os.path.join(self.dir(job.id), "job.json.tmp")
         with open(tmp, "w") as f:
             json.dump(asdict(job), f)
@@ -122,12 +127,26 @@ class JobManager:
         return job
 
     def cancel(self, job_id: str) -> None:
-        job = self.jobs[job_id]
-        if job.status == "queued":
-            job.status, job.finished = "cancelled", time.time()
-            self._save(job)
-        elif job.status == "running":
-            self._cancel.add(job_id)
+        with self._lock:
+            job = self.jobs[job_id]
+            if job.status == "queued":
+                job.status, job.finished = "cancelled", time.time()
+                self._save(job)
+            elif job.status == "running":
+                self._cancel.add(job_id)
+
+    def delete(self, job_id: str) -> None:
+        """Forget a job and remove its files. A running job is stopped, and its files go once it has."""
+        with self._lock:
+            job = self.jobs.pop(job_id)
+            if job.status == "running":
+                self._cancel.add(job_id)
+                self._deleted.add(job_id)
+                with contextlib.suppress(FileNotFoundError):  # so that a restart can't bring it back
+                    os.remove(os.path.join(self.dir(job_id), "job.json"))
+                return
+            job.status = "cancelled"  # if it's still queued, the worker skips it
+        shutil.rmtree(self.dir(job_id), ignore_errors=True)
 
     def _new(self, name: str, kind: str, cfg: dict) -> Job:
         job = Job(id=uuid.uuid4().hex[:12], name=name, kind=kind, config=cfg)
@@ -158,14 +177,15 @@ class JobManager:
             torch.cuda.empty_cache()
 
     def _run(self, job: Job) -> None:
-        if job.status == "cancelled":
-            return
         d = self.dir(job.id)
         c = job.config
         cfg = self._fit_config(c)
         t0 = time.time()
-        job.status, job.started = "running", t0
-        self._save(job)
+        with self._lock:
+            if job.status == "cancelled":
+                return
+            job.status, job.started = "running", t0
+            self._save(job)
         total_steps = cfg.roll_steps + stage2_steps(cfg) + 2
         c["total_steps"] = total_steps  # for the loss chart's x axis
         last_save = [0.0]
@@ -248,8 +268,13 @@ class JobManager:
             end("failed", f"{type(e).__name__}: {e}")
             traceback.print_exc()
         finally:
-            self._cancel.discard(job.id)
-            self._save(job)
+            with self._lock:
+                self._cancel.discard(job.id)
+                if job.id in self._deleted:
+                    self._deleted.discard(job.id)
+                    shutil.rmtree(d, ignore_errors=True)
+                else:
+                    self._save(job)
 
     def target_audio(self, job_id: str) -> torch.Tensor:
         x, _ = sf.read(os.path.join(self.dir(job_id), "target.wav"), dtype="float32")

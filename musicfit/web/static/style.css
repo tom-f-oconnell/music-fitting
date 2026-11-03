@@ -53,7 +53,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-
 #job-times { margin: 4px 0 0; }
 .jobs li.job:hover { background: var(--panel-2); }
 .jobs li.job.active { background: var(--panel-2); outline: 1px solid var(--line); }
-.jobs .jname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobs .jname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.jobs .jdel { background: none; border: none; padding: 0 4px; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.jobs .jdel:hover, .jobs .jdel:focus-visible { color: var(--bad); }
 .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--panel-2); color: var(--muted); white-space: nowrap; }
 .badge.done { color: var(--ok); } .badge.failed, .badge.cancelled { color: var(--bad); } .badge.running { color: var(--accent); }
 .empty { color: var(--muted); padding: 60px 20px; text-align: center; }

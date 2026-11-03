@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import functools
 import os
-import shutil
 import tempfile
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -253,13 +252,13 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str):
-        job = jobs.get(job_id)
-        if job is None:
+        """Delete a job, stopping it first if it's queued or running."""
+        if jobs.get(job_id) is None:
             raise HTTPException(404, "no such job")
-        if job.status in ("queued", "running"):
-            raise HTTPException(409, "cancel the job first")
-        del jobs.jobs[job_id]
-        shutil.rmtree(jobs.dir(job_id), ignore_errors=True)
+        try:
+            jobs.delete(job_id)
+        except KeyError:  # deleted by another request meanwhile
+            raise HTTPException(404, "no such job") from None
         return {"ok": True}
 
     @app.get("/api/library")

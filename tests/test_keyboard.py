@@ -488,3 +488,81 @@ def test_drums_go_to_midi_by_general_midi_note(roll_results):
 def test_a_drums_only_job_has_only_the_drum_lane(roll_results):
     d = roll_results["drumsOnly"]
     assert d["lanes"] == ["Drums"] and d["synthHidden"] and d["playHidden"]
+
+
+# ---- deleting jobs from the list
+
+LIST_TEST = r"""
+const wav = Uint8Array.from(atob("%(wav)s"), (c) => c.charCodeAt(0));
+const jobs = %(jobs)s;
+let listed = Object.values(jobs);
+window.requests = [];
+window.confirms = [];
+window.confirm = (text) => { confirms.push(text); return true; };
+const realFetch = window.fetch;
+window.fetch = async (url, opts) => {
+  const path = String(url).split("?")[0], method = (opts && opts.method) || "GET";
+  if (method === "DELETE") requests.push([method, path]);
+  if (path.endsWith(".wav") || path.endsWith("/render")) return new Response(wav.slice(), { status: 200, headers: { "X-Spectral-Loss": "1.0" } });
+  const job = path.match(/^\/api\/jobs\/(\w+)$/);
+  if (job && method === "DELETE") { listed = listed.filter((j) => j.id !== job[1]); return new Response("{}", { status: 200 }); }
+  const reply = job ? jobs[job[1]] : { "/api/specs": %(specs)s, "/api/jobs": listed, "/api/library": %(library)s }[path];
+  if (reply !== undefined) return new Response(JSON.stringify(reply), { status: 200 });
+  return realFetch(url, opts);
+};
+location.hash = "job=done1";
+"""
+LIST_RUN = r"""
+(async () => {
+  const until = async (test) => { for (let i = 0; i < 100 && !test(); i++) await new Promise((r) => setTimeout(r, 100)); };
+  const names = () => [...document.querySelectorAll("#jobs .job .jname")].map((x) => x.textContent);
+  const cross = (name) => [...document.querySelectorAll("#jobs .job")].find((li) => li.querySelector(".jname").textContent === name).querySelector(".jdel");
+  await until(() => S.job && S.job.id === "done1" && names().length === 2);
+  const out = { before: names(), titles: [...document.querySelectorAll("#jobs .jdel")].map((b) => [b.textContent, b.title]) };
+  cross("run1").click();
+  await until(() => names().length === 1);
+  out.running = { names: names(), selected: S.jobId, shown: !document.querySelector("#job-view").hidden };
+  cross("done1").click();
+  await until(() => names().length === 0);
+  out.selected = { selected: S.jobId, viewHidden: document.querySelector("#job-view").hidden, hash: location.hash,
+                   list: document.querySelector("#jobs").textContent };
+  Object.assign(out, { requests, confirms });
+  await realFetch("/jobs", { method: "POST", body: JSON.stringify(out) });
+})().catch((e) => realFetch("/error", { method: "POST", body: String(e) + " " + e.stack }));
+"""
+
+
+@pytest.fixture(scope="module")
+def list_results(tmp_path_factory):
+    static = os.path.dirname(KEYBOARD_JS)
+    with open(os.path.join(static, "index.html")) as f:
+        html = f.read()
+    with open(KEYBOARD_JS) as f:
+        keyboard = f.read()
+    with open(os.path.join(static, "app.js")) as f:
+        app = f.read()
+    patch = {**BASE, "waveform": BASE["waveform"]}
+    notes = [{"pitch": 60.0, "onset": 0.1, "duration": 0.3, "velocity": 0.8, "voice": 0}]
+    running = {**_job("run1", [], [], []), "status": "running", "progress": 0.4, "finished": None, "result": None}
+    jobs = {"run1": running, "done1": _job("done1", [patch], notes, [])}
+    setup = LIST_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(SPECS), "library": json.dumps(LIBRARY)}
+    html = html.replace('<script src="keyboard.js"></script>', f"<script>{setup}</script><script>{keyboard}</script>")
+    html = html.replace('<script src="app.js"></script>', f"<script>{app}</script><script>{LIST_RUN}</script>")
+    return json.loads(_run_page_in_chrome(html, 1, tmp_path_factory.mktemp("chrome"))["/jobs"])
+
+
+@needs_chrome
+def test_each_job_has_a_cross_that_deletes_it(list_results):
+    r = list_results
+    assert r["before"] == ["run1", "done1"]
+    assert r["titles"] == [["×", "Stop and delete this job"], ["×", "Delete this job"]]
+    assert r["requests"] == [["DELETE", "/api/jobs/run1"], ["DELETE", "/api/jobs/done1"]]
+    assert r["confirms"] == ["Stop and delete “run1”?", "Delete “done1” and its results?"]
+
+
+@needs_chrome
+def test_the_cross_doesnt_open_the_job_and_closes_it_if_open(list_results):
+    r = list_results
+    assert r["running"] == {"names": ["done1"], "selected": "done1", "shown": True}
+    assert r["selected"]["selected"] is None and r["selected"]["viewHidden"] and r["selected"]["hash"] == ""
+    assert "No jobs yet" in r["selected"]["list"]
