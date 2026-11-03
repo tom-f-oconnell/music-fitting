@@ -577,6 +577,20 @@ Against the mix: grouped +0.093 ± 0.029 (better on 15 of 19), kicks +0.24 ± 0.
 leaves most hats in the other stems (at 16 kHz a hat is little more than its lowest octave).
 So the web app ticks Demucs for drums-only fits when it is installed.
 
+Where the drums go: projecting Demucs's stems onto the true drums (the 20 windows), its drum
+stem holds 86 % of them below 300 Hz but only 44–49 % from 300 Hz to 5 kHz and 39 % from 5 to 8
+kHz, where 56 % is in "other". Part of that is the 16 kHz input, which lacks everything that
+makes a hat a hat to a model trained at 44.1 kHz: on 14 real clips, Demucs at 44.1 kHz gave
+its drum stem 0.75 of the 5–8 kHz energy against 0.62 from the same clips at 16 kHz (Alberto
+Balsalm 0.33 → 0.82, Fingerbib 0.02 → 0.43), and the same share below 2 kHz (0.43). BabySlakh
+is 16 kHz only, so that can't be scored. What can: fitting the drums to Demucs's drums plus
+what it gave the other stems above 5 kHz brings hats from 0.20 to 0.33 (+0.17 ± 0.10 paired;
+the true stem scores 0.39) and grouped F1 from 0.344 to 0.395 (+0.030 ± 0.029; true stem
+0.402), with kicks and snares unchanged. Demucs's drums below 5 kHz with the whole mix above
+are about the same (hats +0.20 ± 0.09, snares −0.07 ± 0.04); 2–3 kHz crossovers are worse. Not
+adopted yet: the crossover was chosen on these windows, and the other stems' top end would
+have to leave the notes' target. Scripts and results are outside the repository.
+
 **Alongside notes** (2 voices; drums join at `drum_start` 0.25 as before) cheap drums take
 over again. In the mix, kits at cost 0.2 find drums where the old voice found 1 hit of 521
 (any 0.301, grouped 0.202), but on real clips they cut Cornish Acid from 21 notes to 10 and 6
