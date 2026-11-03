@@ -25,14 +25,19 @@ Then open http://localhost:43153.
   (Standard, or Quick, which leaves slightly more spurious notes). Or click **Run
   demo fit** to fit a random synthetic melody whose true notes and patch are shown
   for comparison.
+* **Drums:** *Fit* chooses notes and drums (the default), notes only, or drums only.
+  Drums are fitted with TR-808 and TR-909 style kits (each drum takes whichever kit's
+  version fits better, then its level, tuning and decay are fitted), or with the
+  *generic* sounds the fit shapes itself, which find hits as well but don't say which
+  drum they are.
 * **Listen and compare:** spectrograms of the original and the fit, a piano
-  roll of the fitted notes, and playback of original / fit / your tweaked
-  version, switching at the same position (space plays and stops).
+  roll with a row of lanes for each voice and one for the drums (a row per drum
+  that was hit), and playback of original / fit / your tweaked version, switching
+  at the same position (space plays and stops).
 * **Tweak:** every patch parameter has a slider, which marks the fitted
   value; hover over it to see what it does, and double-click to reset it.
-  Changes re-render within a second. Click a
-  note to mute it. Drums and other unpitched sound are fitted separately and
-  stay in every re-render unless you tick *Mute drums & noise*.
+  Changes re-render within a second. Click a note or a drum hit to mute it.
+  The drums stay in every re-render unless you tick *Mute drums & noise*.
 * **Mono lead or acid line:** under Advanced, this also fits slides between
   notes and more harmonics, and takes about two-thirds longer.
 * **Play:** the box below the patch plays it live, with the mouse or your computer
@@ -45,7 +50,8 @@ Then open http://localhost:43153.
   Zenodo record. Downloads are kept on disk, can be stopped and resumed, and appear
   under *Audio*. Downloading copyrighted music is subject to YouTube's terms and
   local law; this is for personal research use.
-* **Export:** patch JSON (re-importable), MIDI, notes JSON, and the WAV.
+* **Export:** patch JSON (re-importable), MIDI (drums on channel 10, as General
+  MIDI drum notes), notes JSON, and the WAV.
 
 It works best on short, sparse synth lines. On its own it finds few of the
 notes in busy music, so for anything dense install the two optional helpers
@@ -74,11 +80,15 @@ python scripts/eval_slakh.py --source mix --out eval_out/slakh_mix.json         
 ```
 
 `fit_audio.py` writes `target.wav`, `fit.wav`, `noise.wav` (the fitted drums
-alone), `notes.mid`, `notes.json` and `params.json` (patches, the estimated
-tuning, drum hits). Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
+alone), `notes.mid` (drums on channel 10), `notes.json` and `params.json` (patches,
+the estimated tuning, the drums' kit, level, tuning and decay, and the drum hits).
+Options: `--sr`, `--pitch-min/--pitch-max` (MIDI),
 `--roll-steps`, `--note-steps`, `--sparsity` (stage-1 penalty: raise for fewer
-spurious notes, lower if notes go missing), `--drum-kinds` (unpitched sounds to
-fit, default 3; 0 for none), `--noise-floor`, `--seed`, `--device` (`auto`,
+spurious notes, lower if notes go missing), `--drum-kit` (default `808,909`: one
+or more of `808`, `909` and folders of your own samples, comma-separated, each file
+named after its drum, like `BD kick.wav`, `snare 2.wav`, `CH.wav`; or `noise` for
+the generic sounds), `--drums-only`, `--drum-kinds 0` (no drums; with `--drum-kit
+noise`, how many sounds), `--noise-floor`, `--seed`, `--device` (`auto`,
 `cpu`, `cuda`, ...), `--lead` (for a mono lead or acid line: fit slides between
 notes, with 128 harmonics). With the optional helpers: `--basic-pitch` starts
 from a transcription instead of finding notes itself, and keeps all its notes,
@@ -95,7 +105,8 @@ tuning=25`, `unison`, `noise`, `drums`, `codec`) or on a 303-style line
 `eval_slakh.py` scores against the true notes of
 [BabySlakh](https://zenodo.org/records/4603870) (20 songs rendered from MIDI, 883
 MB; its docstring has the download), on mixes or one instrument (`--source`),
-with `--method fit`, `basic-pitch` or `fit+basic-pitch`, and `--separate`.
+with `--method fit`, `basic-pitch` or `fit+basic-pitch`, and `--separate`; `--drums`
+also scores the drum hits, and `--drum-stem` fits the true drum stem alone.
 From Python, `musicfit.fit.fit(audio_tensor, FitConfig(...))`; `FitConfig`
 documents every knob.
 
@@ -110,15 +121,17 @@ the terminal shows the same for all requests; behind an SSH tunnel the address i
 HTTP API (JSON unless noted): `GET /api/specs`, `GET /api/jobs`,
 `POST /api/jobs` (multipart: `file` or `track`, `offset`, `duration`, `voices`,
 `roll_steps`, `note_steps`, `sparsity`, `pitch_min`, `pitch_max`, `seed`, `lead`,
-`full_memory`, `separate`, `basic_pitch`; the last two only if `tools` in `/api/specs` says they are
-installed),
+`full_memory`, `fit_mode` (`notes_and_drums`, `notes`, `drums`), `drum_kit` (`808,909`, `808`,
+`909`, `noise`; a folder of samples only from the command line), `separate`, `basic_pitch`; the
+last two only if `tools` in `/api/specs` says they are installed),
 `POST /api/jobs/demo`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`,
 `GET /api/library` (cached tracks and downloads), `GET /api/library/audio?track=`,
 `POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
 `POST /api/library/downloads/{id}/cancel`,
 `DELETE /api/jobs/{id}`, `GET /api/jobs/{id}/audio/{target|fit}.wav`,
-`POST /api/jobs/{id}/render` (`{patches, notes, muted_voices}` → WAV, loss in
-the `X-Spectral-Loss` header), `POST /api/midi` (`{notes}` → .mid).
+`POST /api/jobs/{id}/render` (`{patches, notes, muted_voices, drum_hits}` → WAV, loss in
+the `X-Spectral-Loss` header; `drum_hits` as `[drum index, time, strength]`), `POST /api/midi`
+(`{notes, drum_hits}` → .mid, `drum_hits` as `[General MIDI note, time, strength]`).
 
 **Dataset from YouTube:**
 
@@ -143,7 +156,8 @@ terms and local law; this is for personal research use.
 ```
 musicfit/
   synth.py        differentiable subtractive synth (PyTorch)
-  drums.py        unpitched voice: drum kinds from an onset roll, noise floor
+  drums.py        drum voices (a kit's drums, or generic sounds) from an onset roll, noise floor
+  drumkit.py      808 and 909 style kits made from scratch, kits from folders of samples
   notes.py        soft piano roll, explicit note list, MIDI writer
   loss.py         multi-resolution STFT loss, expected spectrum of a detuned unison
   tuning.py       the recording's offset from A440

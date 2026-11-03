@@ -16,6 +16,7 @@ import soundfile as sf
 import torch
 
 from ..audio_io import load_audio, save_audio
+from ..drums import load_drum_voice
 from ..fit import FitConfig, fit, lead_settings, note_metrics, stage2_steps
 from ..synthetic import synthetic_target
 from ..tools import fit_with_tools
@@ -140,7 +141,8 @@ class JobManager:
 
     def _fit_config(self, c: dict) -> FitConfig:
         return FitConfig(
-            sr=int(c.get("sr", 16000)), n_voices=int(c.get("voices", 1)),
+            sr=int(c.get("sr", 16000)), n_voices=0 if c.get("fit_mode") == "drums" else int(c.get("voices", 1)),
+            drum_kinds=0 if c.get("fit_mode") == "notes" else 3, drum_kit=c.get("drum_kit", "808,909"),
             pitch_min=int(c.get("pitch_min", 36)), pitch_max=int(c.get("pitch_max", 84)),
             roll_steps=int(c.get("roll_steps", 400)), note_steps=int(c.get("note_steps", 300)),
             sparsity=float(c.get("sparsity", 0.5)), seed=int(c.get("seed", 0)),
@@ -215,6 +217,7 @@ class JobManager:
                 with torch.no_grad():
                     noise = res.noise.render(int(target.numel())).cpu()
                 sf.write(os.path.join(d, "noise.wav"), noise.numpy(), cfg.sr, subtype="FLOAT")
+                res.noise.cpu().save(os.path.join(d, "drums.pt"))  # to play edited hits later
             if job.kind == "demo":
                 reference = {
                     "patch": true_params.describe(),
@@ -233,6 +236,7 @@ class JobManager:
                 "tuning_cents": res.tuning_cents,
                 "has_noise": res.noise is not None,
                 "drum_hits": [[k, round(t, 3), round(v, 3)] for k, t, v in res.noise.hits()] if res.noise else [],
+                "drums": res.noise.describe() if res.noise else [],  # name, General MIDI note and kit of each kind
                 "history": res.history,
                 "reference": reference,
             }
@@ -250,6 +254,11 @@ class JobManager:
     def target_audio(self, job_id: str) -> torch.Tensor:
         x, _ = sf.read(os.path.join(self.dir(job_id), "target.wav"), dtype="float32")
         return torch.from_numpy(x)
+
+    def drum_voice(self, job_id: str):
+        """The fitted drum voice, for playing edited hits; None for jobs from before it was saved."""
+        path = os.path.join(self.dir(job_id), "drums.pt")
+        return load_drum_voice(path) if os.path.exists(path) else None
 
     def noise_audio(self, job_id: str) -> torch.Tensor | None:
         path = os.path.join(self.dir(job_id), "noise.wav")

@@ -45,6 +45,23 @@
             </select>
           </label>
         </div>
+        <div class="row">
+          <label>Fit
+            <select name="fit_mode" id="fit-mode">
+              <option value="notes_and_drums" selected>Notes and drums</option>
+              <option value="notes">Notes only</option>
+              <option value="drums">Drums only</option>
+            </select>
+          </label>
+          <label title="Each drum is fitted with the kit that sounds most like it">Drum kit
+            <select name="drum_kit" id="drum-kit">
+              <option value="808,909" selected>808 or 909, per drum</option>
+              <option value="808">808</option>
+              <option value="909">909</option>
+              <option value="noise">Generic noise bursts</option>
+            </select>
+          </label>
+        </div>
         <details>
           <summary>Advanced</summary>
           <div class="row">
@@ -130,7 +147,7 @@
           <div class="canvas-wrap"><canvas id="spec-target"></canvas><div class="playhead"></div></div>
           <div class="viz-label">Tweaked render spectrogram</div>
           <div class="canvas-wrap"><canvas id="spec-tweak"></canvas><div class="playhead"></div></div>
-          <div class="viz-label">Notes <span class="hint">click a note to mute or unmute it<span id="ref-legend" hidden>; outlined grey boxes are the ground-truth notes</span></span></div>
+          <div class="viz-label">Notes and drums <span class="hint">click a note or a drum hit to mute or unmute it<span id="ref-legend" hidden>; outlined grey boxes are the ground-truth notes</span></span></div>
           <div class="canvas-wrap"><canvas id="roll"></canvas><div class="playhead"></div><div id="tooltip" class="tooltip" hidden></div></div>
           <div id="metrics" class="hint"></div>
         </section>

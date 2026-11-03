@@ -17,6 +17,8 @@ instrument class ("Bass", "Piano", "Synth Lead", ...). --method: "fit" (default)
 model gets) or "fit+basic-pitch" (stage 2 from its notes). --separate runs Demucs
 first (see musicfit.tools). Notes outside the fit's pitch range aren't counted.
 Results are paired by clip, like eval_synthetic.py, whose options work the same.
+--drums also scores the fitted drum hits against the true ones (musicfit.slakh.score_drums), and
+--drum-stem fits the clip's drum stems alone instead of the source (perfect separation).
 """
 
 import argparse
@@ -42,7 +44,7 @@ from eval_synthetic import (  # noqa: E402
 )
 
 from musicfit.fit import FitConfig, match_notes, note_metrics  # noqa: E402
-from musicfit.slakh import Clip, make_clips  # noqa: E402
+from musicfit.slakh import Clip, make_clips, score_drums  # noqa: E402
 
 
 def transcribe_only(clip: Clip, cfg: FitConfig, use_demucs: bool):
@@ -56,25 +58,29 @@ def transcribe_only(clip: Clip, cfg: FitConfig, use_demucs: bool):
 
 
 def fit_clip(args) -> dict:
-    clip, overrides, method, use_demucs, threads = args
+    clip, overrides, method, use_demucs, threads, drum_stem = args
     torch.set_num_threads(threads)
     cfg = FitConfig(seed=clip.clip_id, **overrides)
+    audio = clip.drum_audio if drum_stem else clip.audio
     t0 = time.time()
     reset_peak_memory()
     if method == "basic-pitch":
         notes = roll_notes = transcribe_only(clip, cfg, use_demucs)
-        loss, patches = float("nan"), []
+        loss, patches, drums = float("nan"), [], None
     else:
         from musicfit.fit import fit
 
         if method == "fit" and not use_demucs:
-            res = fit(clip.audio, cfg, verbose=False)
+            res = fit(audio, cfg, verbose=False)
         else:
             from musicfit.tools import fit_with_tools
 
-            res = fit_with_tools(clip.audio, cfg, use_demucs, method == "fit+basic-pitch", verbose=False)
+            res = fit_with_tools(audio, cfg, use_demucs, method == "fit+basic-pitch", verbose=False)
         notes, roll_notes = res.notes, res.roll_notes
-        loss, patches = res.history[-1]["loss"], [s.params.describe() for s in res.synths]
+        loss, patches, drums = res.history[-1]["loss"], [s.params.describe() for s in res.synths], res.noise
+    # every peak, so that other thresholds can be scored later without fitting again
+    all_hits = [(drums.names[k], t, v) for k, t, v in drums.hits(0.05)] if drums is not None and drums.names else []
+    drum_hits = [h for h in all_hits if h[2] >= cfg.drum_threshold]
     found = match_notes(notes, clip.ref)
     return {
         "seed": clip.clip_id,
@@ -92,7 +98,24 @@ def fit_clip(args) -> dict:
         "roll_notes": [n.as_dict() for n in roll_notes],
         "notes": [n.as_dict() for n in notes],
         "fitted_patches": patches,
+        "drum_hits": drum_hits,
+        "drum_peaks": all_hits,
+        "drum_ref": [[n.pitch, n.onset] for n in clip.drum_ref],
+        "drum_metrics": score_drums([(name, t) for name, t, _ in drum_hits], clip.drum_ref),
+        "drum_kit": drums.describe() if drums is not None and drums.names else [],
     }
+
+
+def summarize_drums(rows: list[dict]) -> dict:
+    """Print and return drum scores, pooled over clips: hits ignoring the drum, by group, and per group."""
+    out = {}
+    for key in ("any", "grouped", "kick", "snare", "hat", "tom", "cymbal"):
+        tp, n_pred, n_ref = (sum(r["drum_metrics"][key][k] for r in rows) for k in ("tp", "n_pred", "n_ref"))
+        p, r = (tp / n_pred if n_pred else 0.0), (tp / n_ref if n_ref else 0.0)
+        out[key] = {"precision": p, "recall": r, "f1": 2 * p * r / (p + r) if p + r else 0.0, "n_pred": n_pred, "n_ref": n_ref}
+    print("drums: " + "; ".join(f"{k} F1 {v['f1']:.3f} (P {v['precision']:.2f} R {v['recall']:.2f}, {v['n_pred']}/{v['n_ref']})"
+                                for k, v in out.items()))
+    return out
 
 
 def main():
@@ -101,6 +124,8 @@ def main():
     ap.add_argument("--source", default="mix", help="mix, pitched, or an instrument class such as Bass")
     ap.add_argument("--method", default="fit", choices=("fit", "basic-pitch", "fit+basic-pitch"))
     ap.add_argument("--separate", action="store_true", help="run Demucs first")
+    ap.add_argument("--drums", action="store_true", help="also score the fitted drum hits")
+    ap.add_argument("--drum-stem", action="store_true", help="fit the true drum stems alone (perfect separation)")
     ap.add_argument("--clips-per-track", type=int, default=1)
     ap.add_argument("--limit", type=int, default=None, help="use only the first LIMIT clips")
     ap.add_argument("--length", type=float, default=4.0, help="clip length in seconds")
@@ -118,8 +143,12 @@ def main():
     on_gpu = torch.cuda.is_available() and cfg.device != "cpu" and args.method != "basic-pitch"
     jobs = args.jobs or (3 if on_gpu else 1)
     threads = max(1, (os.cpu_count() or 1) // jobs)
-    rows = run_targets(fit_clip, [(c, overrides, args.method, args.separate, threads) for c in clips], jobs)
+    if args.drum_stem:
+        clips = [c for c in clips if c.drum_audio is not None]
+    rows = run_targets(fit_clip, [(c, overrides, args.method, args.separate, threads, args.drum_stem) for c in clips], jobs)
     mean = summarize(rows)
+    if args.drums:
+        mean["drums"] = summarize_drums(rows)
 
     totals, found = Counter(), Counter()
     for r in rows:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import glob
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import mido
 import soundfile as sf
@@ -46,6 +46,8 @@ class Clip:
     ref: list[Note]
     ref_class: list[str]  # the instrument class of each reference note
     n_out_of_range: int  # true notes left out of ref for being outside the fit's pitch range
+    drum_ref: list[Note] = field(default_factory=list)  # the drum hits, pitch being the General MIDI drum note
+    drum_audio: torch.Tensor | None = None  # the drum stems alone, normalised like audio
 
 
 def read_midi_notes(path: str) -> list[Note]:
@@ -148,7 +150,8 @@ def make_clips(
     clips = []
     for track_dir in sorted(glob.glob(os.path.join(root, "Track*"))):
         track = os.path.basename(track_dir)
-        stems = source_stems(read_track(track_dir), source)
+        all_stems = read_track(track_dir)
+        stems = source_stems(all_stems, source)
         pitched = [s for s in stems if not s.is_drum]
         if not pitched:
             continue
@@ -171,6 +174,59 @@ def make_clips(
                         else:
                             dropped += 1
             order = sorted(range(len(ref)), key=lambda j: (ref[j].onset, ref[j].pitch))
+            drum_stems = [s for s in all_stems if s.is_drum]
+            drum_ref = sorted((replace(q, onset=q.onset - start) for s in drum_stems for q in s.notes
+                               if start <= q.onset < start + length), key=lambda n: (n.onset, n.pitch))
+            drum_audio = sum(_read_window(s.audio, start, length, sr) for s in drum_stems) if drum_stems else None
             clips.append(Clip(int(track[5:]) * 100 + i, track, start, audio / (audio.abs().max() + 1e-8) * 0.5,
-                              [ref[j] for j in order], [ref_class[j] for j in order], dropped))
+                              [ref[j] for j in order], [ref_class[j] for j in order], dropped, drum_ref,
+                              None if drum_audio is None else drum_audio / (drum_audio.abs().max() + 1e-8) * 0.5))
     return clips
+
+
+def score_drums(hits: list[tuple[str, float]], ref: list[Note], onset_tol: float = 0.05) -> dict:
+    """How well fitted drum hits match the true ones.
+
+    Args:
+        hits: (drum name, time in s), names as in musicfit.drumkit.DRUMS. Other names (a generic
+            drum voice's "drum 1", ...) count for the group most of their matched hits belong to.
+        ref: true hits, pitch being the General MIDI drum note.
+        onset_tol: how far apart in time a hit and a true hit may be.
+
+    Returns:
+        "any": precision, recall, F1 ignoring which drum; "grouped": the same where the group
+        (kick, snare, hat, tom, cymbal, other) has to match too; and per group, its counts.
+    """
+    from .drumkit import GM_TO_DRUM, GROUP
+
+    ref_groups = [GROUP.get(GM_TO_DRUM.get(int(round(n.pitch)), "cowbell"), "other") for n in ref]
+
+    def match(same) -> list[tuple[int, int]]:
+        pairs = sorted((abs(t - ref[j].onset), i, j) for i, (_, t) in enumerate(hits) for j in range(len(ref))
+                       if abs(t - ref[j].onset) <= onset_tol and same(i, j))
+        used_i, used_j, out = set(), set(), []
+        for _, i, j in pairs:
+            if i not in used_i and j not in used_j:
+                used_i.add(i)
+                used_j.add(j)
+                out.append((i, j))
+        return out
+
+    def counts(tp: int, n_pred: int, n_ref: int) -> dict:
+        p, r = (tp / n_pred if n_pred else 0.0), (tp / n_ref if n_ref else 0.0)
+        return {"tp": tp, "n_pred": n_pred, "n_ref": n_ref, "precision": p, "recall": r, "f1": 2 * p * r / (p + r) if p + r else 0.0}
+
+    any_match = match(lambda i, j: True)
+    group = {}
+    for name in {name for name, _ in hits}:
+        if name in GROUP:
+            group[name] = GROUP[name]
+        else:
+            found = [ref_groups[j] for i, j in any_match if hits[i][0] == name]
+            group[name] = max(set(found), key=found.count) if found else "other"
+    hit_groups = [group[name] for name, _ in hits]
+    grouped = match(lambda i, j: hit_groups[i] == ref_groups[j])
+    out = {"any": counts(len(any_match), len(hits), len(ref)), "grouped": counts(len(grouped), len(hits), len(ref))}
+    for g in ("kick", "snare", "hat", "tom", "cymbal", "other"):
+        out[g] = counts(sum(hit_groups[i] == g for i, _ in grouped), hit_groups.count(g), ref_groups.count(g))
+    return out

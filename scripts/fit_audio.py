@@ -36,7 +36,11 @@ def main():
     ap.add_argument("--note-steps", type=int, default=300)
     ap.add_argument("--sparsity", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--drum-kinds", type=int, default=3, help="unpitched drum kinds to fit (0: none)")
+    ap.add_argument("--drum-kinds", type=int, default=3, help="0 for no drums (with --drum-kit noise: how many kinds)")
+    ap.add_argument("--drum-kit", default="808,909",
+                    help="kits to fit drums against, comma-separated: 808, 909, or a folder of samples named after "
+                         "their drums (kick.wav, snare.wav, ...); each drum keeps the best fit. noise: generic noise bursts")
+    ap.add_argument("--drums-only", action="store_true", help="fit only the drums (with --separate, to Demucs's drum stem)")
     ap.add_argument("--noise-floor", action="store_true", help="also fit a stationary noise floor")
     ap.add_argument("--lead", action="store_true",
                     help="for a mono lead or acid line: fit a portamento per note, with more harmonics")
@@ -51,7 +55,7 @@ def main():
 
     target = load_audio(args.audio, args.sr, args.offset, args.duration)
     target = target / (target.abs().max() + 1e-8) * 0.5
-    cfg = FitConfig(sr=args.sr, n_voices=args.voices, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
+    cfg = FitConfig(sr=args.sr, n_voices=0 if args.drums_only else args.voices, drum_kit=args.drum_kit, pitch_min=args.pitch_min, pitch_max=args.pitch_max,
                     roll_steps=args.roll_steps, note_steps=args.note_steps, sparsity=args.sparsity, seed=args.seed,
                     drum_kinds=args.drum_kinds, noise_floor=args.noise_floor, device=args.device, memory_mode=args.memory_mode,
                     **(lead_settings() if args.lead else {}))
@@ -67,15 +71,18 @@ def main():
     if res.noise is not None:
         with torch.no_grad():
             save_audio(os.path.join(args.out, "noise.wav"), res.noise.render(target.numel()), args.sr)
-    write_midi(res.notes, os.path.join(args.out, "notes.mid"))
+    hits = res.noise.hits() if res.noise is not None else []
+    gm = res.noise.gm_notes if res.noise is not None else []
+    write_midi(res.notes, os.path.join(args.out, "notes.mid"), drums=[(gm[k], t, v) for k, t, v in hits])
     with open(os.path.join(args.out, "notes.json"), "w") as f:
         json.dump([n.as_dict() for n in res.notes], f, indent=2)
     with open(os.path.join(args.out, "params.json"), "w") as f:
-        hits = res.noise.hits() if res.noise is not None else []
+        names = res.noise.names if res.noise is not None else []
         json.dump({"voices": [s.params.describe() for s in res.synths], "tuning_cents": res.tuning_cents,
-                   "drum_hits": [{"kind": k, "time": round(t, 3), "strength": round(v, 3)} for k, t, v in hits],
+                   "drums": res.noise.describe() if res.noise is not None else [],
+                   "drum_hits": [{"drum": names[k], "gm": gm[k], "time": round(t, 3), "strength": round(v, 3)} for k, t, v in hits],
                    "history": res.history}, f, indent=2)
-    print(f"wrote {len(res.notes)} notes and {len(res.synths)} patches to {args.out}")
+    print(f"wrote {len(res.notes)} notes, {len(hits)} drum hits and {len(res.synths)} patches to {args.out}")
 
 
 if __name__ == "__main__":

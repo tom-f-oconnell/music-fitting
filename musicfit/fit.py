@@ -22,7 +22,8 @@ from typing import Callable
 import torch
 
 from .batching import backward_in_batches, render_mix
-from .drums import NoiseVoice
+from .drumkit import make_kit
+from .drums import KitVoice, NoiseVoice
 from .loss import MultiResolutionSTFTLoss
 from .notes import Note, NoteSequence, PianoRoll
 from .synth import Synth, SynthParams
@@ -50,10 +51,14 @@ class FitConfig:
     sparsity: float = 0.5  # L1 weight on roll mass per frame, reached after sparsity_warmup
     sparsity_warmup: float = 0.5  # fraction of roll_steps over which the L1 weight ramps up from 0
     decode_threshold: float = 0.3
-    # unpitched sounds (drums.NoiseVoice): drum kinds triggered by an onset roll, and a noise floor
-    drum_kinds: int = 3
+    # unpitched sounds (drums.py): drum hits from an onset roll, and a noise floor
+    drum_kinds: int = 3  # 0: no drums; with drum_kit "noise", how many kinds of its own to make
+    # kits to fit the drums against, comma-separated: "808", "909" or a folder of samples (drumkit.py);
+    # each drum keeps whichever fits it best. "noise": generic noise bursts instead (the drum voice before kits)
+    drum_kit: str = "808,909"
     noise_floor: bool = False
-    drum_sparsity: float = 5.0  # multiplies `sparsity` for the drum roll: hits should be few and strong
+    drum_sparsity: float = 0.2  # multiplies `sparsity` for the drum roll (higher: fewer, stronger hits)
+    drum_threshold: float = 0.3  # how strong a peak of the drum roll has to be to count as a hit
     drum_start: float = 0.25  # fraction of roll_steps before the drums join (pitched content first; see design.md)
     # stage 2; a faster onset rate drifts notes off the onsets stage 1 found (design.md)
     note_steps: int = 300
@@ -279,7 +284,10 @@ def fit(
         for _ in range(cfg.n_voices)
     ]
     noise = None
-    if cfg.drum_kinds or cfg.noise_floor:
+    if cfg.drum_kinds and cfg.drum_kit != "noise":
+        noise = KitVoice(n_frames, cfg.frame_hop_s, cfg.sr, make_kit(cfg.drum_kit, cfg.sr), noise_floor=cfg.noise_floor,
+                         generator=gen, seed=cfg.seed).to(device)
+    elif cfg.drum_kinds or cfg.noise_floor:
         noise = NoiseVoice(n_frames, cfg.frame_hop_s, cfg.sr, cfg.drum_kinds, noise_floor=cfg.noise_floor,
                            generator=gen, seed=cfg.seed).to(device)
     render_noise = (lambda: noise.render(T)) if noise is not None else (lambda: 0.0)
@@ -347,7 +355,8 @@ def fit(
         )
         sched = _linear_decay(opt, cfg.roll_steps, cfg.lr_decay)
         for step in range(cfg.roll_steps + 1):
-            drums_on = noise is not None and step >= cfg.drum_start * cfg.roll_steps
+            # with no voices, the drums are all there is to fit from the start
+            drums_on = noise is not None and (not rolls or step >= cfg.drum_start * cfg.roll_steps)
             ramp = min(1.0, step / max(1, cfg.sparsity_warmup * cfg.roll_steps))
             mass = []
 
@@ -432,6 +441,10 @@ def fit(
 
     if init_notes is not None:
         refine(seqs, cfg.roll_steps // 4, 0, lr_scale=cfg.synth_lr / cfg.synth_lr_stage2, notes_frozen=True)
+    if isinstance(noise, KitVoice):
+        noise.commit()  # each drum keeps one kit's sound from here on
+    if noise is not None:
+        noise.hit_threshold = cfg.drum_threshold
     refine(seqs, cfg.note_steps, 0)
     notes = [n for q in seqs for n in q.to_notes(cfg.prune_velocity)]
     if cfg.prune_tol > 0:

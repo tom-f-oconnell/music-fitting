@@ -154,6 +154,11 @@ def fit_with_tools(
         return fit(target, note_cfg, verbose, progress, init_notes=initial_notes(target))
 
     stems = separate(target, cfg.sr, device=cfg.device)
+    if cfg.n_voices == 0:  # drums only
+        res = fit(stems["drums"], replace(cfg, drum_start=0.0), verbose, progress)
+        loss = float(MultiResolutionSTFTLoss(cfg.fft_sizes)(res.audio, target.float().cpu()))
+        res.history.append({"stage": "final", "step": 0, "loss": loss, "n_notes": 0})
+        return res
     pitched = sum(stems[s] for s in PITCHED_STEMS if s in stems)
     res = fit(pitched, replace(note_cfg, drum_kinds=0, noise_floor=False), verbose, progress,
               init_notes=initial_notes(pitched))

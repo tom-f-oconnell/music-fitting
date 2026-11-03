@@ -223,6 +223,9 @@ async function showResult(job) {
   const saved = load("musicfit:" + job.id);
   S.patches = saved && saved.patches && saved.patches.length === r.patches.length ? saved.patches : JSON.parse(JSON.stringify(r.patches));
   S.notes = (saved && saved.notes) || r.notes.map((n) => ({ ...n, muted: false }));
+  S.drumHits = (saved && saved.drumHits) || (r.drum_hits || []).map(([kind, onset, velocity]) => ({ kind, onset, velocity, muted: false }));
+  // drums-only fits have no voices: nothing to tweak or play
+  document.querySelector(".card.synth").hidden = document.querySelector(".card.play").hidden = !r.patches.length;
   S.mutedVoices = new Set((saved && saved.mutedVoices) || []);
   S.muteNoise = !!(saved && saved.muteNoise);
   $("#noise-mute-wrap").hidden = !r.has_noise;
@@ -253,7 +256,13 @@ function showMetrics() {
   const r = S.job.result;
   const el = $("#metrics");
   const nAct = S.notes.filter((n) => !n.muted).length;
-  let html = `${S.notes.length} fitted notes (${nAct} active), ${r.patches.length} voice${r.patches.length > 1 ? "s" : ""}, clip ${(r.n_samples / r.sr).toFixed(2)} s.`;
+  let html = `${S.notes.length} fitted notes (${nAct} active), ${r.patches.length} voice${r.patches.length !== 1 ? "s" : ""}, clip ${(r.n_samples / r.sr).toFixed(2)} s.`;
+  if (S.drumHits.length) {
+    const counts = {};
+    for (const hit of S.drumHits) counts[hit.kind] = (counts[hit.kind] || 0) + 1;
+    const list = Object.entries(counts).map(([kind, n]) => `${drumLabel(Number(kind))} ${n}`).join(", ");
+    html += ` ${S.drumHits.length} drum hits (${S.drumHits.filter((x) => !x.muted).length} active): ${list}.`;
+  }
   if (r.reference) {
     const m = r.reference.metrics_final;
     html += ` Against the ground truth: precision ${m.precision.toFixed(2)}, recall ${m.recall.toFixed(2)}, F1 ${m.f1.toFixed(2)} (${m.tp}/${m.n_ref} notes found).`;
@@ -262,7 +271,7 @@ function showMetrics() {
 }
 
 function persist() {
-  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, mutedVoices: [...S.mutedVoices], muteNoise: S.muteNoise });
+  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, drumHits: S.drumHits, mutedVoices: [...S.mutedVoices], muteNoise: S.muteNoise });
 }
 
 // ---------------------------------------------------------------- sliders
@@ -270,6 +279,7 @@ function persist() {
 function buildVoiceTabs() {
   const tabs = $("#voice-tabs");
   tabs.innerHTML = "";
+  if (!S.patches.length) return;
   if (S.patches.length < 2) return;
   S.patches.forEach((_, v) => {
     const b = document.createElement("button");
@@ -317,6 +327,7 @@ function sliderRow(label, spec, help, get, set, fittedVal, trueVal) {
 function buildSliders() {
   const grid = $("#sliders");
   grid.innerHTML = "";
+  if (!S.patches.length) return;
   const v = S.voice;
   const p = S.patches[v], f = S.fitted[v];
   const ref = S.job.result.reference && v === 0 ? S.job.result.reference.patch : null;
@@ -374,7 +385,8 @@ async function renderTweaked() {
     const r = await api(`/api/jobs/${S.job.id}/render`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ patches: S.patches, notes, muted_voices: [...S.mutedVoices], mute_noise: S.muteNoise }),
+      body: JSON.stringify({ patches: S.patches, notes, muted_voices: [...S.mutedVoices], mute_noise: S.muteNoise,
+                             drum_hits: (S.job.result.drums || []).length ? S.drumHits.filter((x) => !x.muted).map((x) => [x.kind, x.onset, x.velocity]) : null }),
       signal: S.renderAbort.signal,
     });
     const loss = r.headers.get("X-Spectral-Loss");
@@ -530,61 +542,129 @@ function drawSpec(canvas, spec) {
 
 // ---------------------------------------------------------------- piano roll
 
-function rollLayout() {
+// One lane per voice, over the pitches it uses, and one for the drums with a row per drum that was hit.
+const LANE_TITLE = 14;  // CSS pixels
+
+function rollLanes() {
+  const r = S.job.result, lanes = [];
+  for (let v = 0; v < r.patches.length; v++) {
+    const own = S.notes.filter((n) => n.voice === v).concat(r.reference ? r.reference.notes.filter((n) => (n.voice || 0) === v) : []);
+    let lo = own.length ? Math.min(...own.map((n) => n.pitch)) : 60, hi = own.length ? Math.max(...own.map((n) => n.pitch)) : 60;
+    lo = Math.floor(lo) - 2; hi = Math.ceil(hi) + 2;
+    if (hi - lo < 12) { const m = (hi + lo) / 2; lo = Math.floor(m - 6); hi = Math.ceil(m + 6); }
+    lanes.push({ kind: "voice", voice: v, lo, hi, rows: hi - lo + 1, title: r.patches.length > 1 ? `Voice ${v + 1}` : "Notes" });
+  }
+  const kinds = [...new Set(S.drumHits.map((h) => h.kind))].sort((a, b) => a - b);
+  if (kinds.length) lanes.push({ kind: "drums", kinds, rows: kinds.length, title: "Drums" });
+  return lanes;
+}
+
+function layoutRoll(c) {
+  const lanes = rollLanes();
+  const weight = (l) => (l.kind === "drums" ? 2.2 : 1) * l.rows;  // drum rows are taller: there are few of them
+  const units = lanes.reduce((a, l) => a + weight(l), 0) || 1;
+  const cssHeight = Math.round(Math.min(640, Math.max(180, units * 8 + lanes.length * LANE_TITLE)));
+  if (c.style.height !== cssHeight + "px") c.style.height = cssHeight + "px";
+  const [w, h, dpr] = sizeCanvas(c);
+  const title = LANE_TITLE * dpr, unit = (h - title * lanes.length) / units;
+  let y = 0;
+  for (const l of lanes) {
+    l.top = y;
+    l.body = y + title;
+    l.rowH = unit * (l.kind === "drums" ? 2.2 : 1);
+    l.bottom = l.body + l.rowH * l.rows;
+    y = l.bottom;
+  }
   const r = S.job.result;
-  const all = S.notes.concat(r.reference ? r.reference.notes : []);
-  let lo = Math.min(...all.map((n) => n.pitch), 60), hi = Math.max(...all.map((n) => n.pitch), 60);
-  lo = Math.floor(lo) - 2; hi = Math.ceil(hi) + 2;
-  if (hi - lo < 14) { const m = (hi + lo) / 2; lo = Math.floor(m - 7); hi = Math.ceil(m + 7); }
-  return { lo, hi, dur: r.n_samples / r.sr };
+  return { lanes, w, h, dpr, dur: r.n_samples / r.sr };
+}
+
+function drumLabel(kind) {
+  const d = (S.job.result.drums || [])[kind];
+  return d ? d.name + (d.kit ? ` (${d.kit})` : "") : `drum ${kind + 1}`;
 }
 
 function drawRoll() {
   const c = $("#roll");
-  const [w, h, dpr] = sizeCanvas(c);
+  const { lanes, w, h, dpr, dur } = layoutRoll(c);
   const g = c.getContext("2d");
-  const { lo, hi, dur } = rollLayout();
-  const rowH = h / (hi - lo + 1);
-  const X = (t) => w * t / dur, Y = (p) => h - (p - lo + 1) * rowH;
+  const X = (t) => w * t / dur;
   g.clearRect(0, 0, w, h);
-  for (let p = lo; p <= hi; p++) {
-    const black = [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12);
-    g.fillStyle = black ? "#1d2027" : "#252a33";
-    g.fillRect(0, Y(p), w, rowH);
-    if (p % 12 === 0) {
-      g.fillStyle = "#8d94a1"; g.font = `${10 * dpr}px system-ui`;
-      g.fillText(noteName(p), 3 * dpr, Y(p) + rowH - 2 * dpr);
+  const ref = S.job.result.reference;
+  for (const l of lanes) {
+    g.fillStyle = "#16181d";
+    g.fillRect(0, l.top, w, l.body - l.top);
+    g.fillStyle = l.kind === "voice" ? VOICE_COLORS[l.voice % 4] : "#c8ccd4";
+    g.font = `600 ${10 * dpr}px system-ui`;
+    g.fillText(l.title, 4 * dpr, l.top + 10.5 * dpr);
+    if (l.kind === "voice") {
+      const Y = (p) => l.body + (l.hi - p) * l.rowH;
+      for (let p = l.lo; p <= l.hi; p++) {
+        g.fillStyle = [1, 3, 6, 8, 10].includes(((p % 12) + 12) % 12) ? "#1d2027" : "#252a33";
+        g.fillRect(0, Y(p), w, l.rowH);
+        if (p % 12 === 0) { g.fillStyle = "#8d94a1"; g.font = `${9 * dpr}px system-ui`; g.fillText(noteName(p), 3 * dpr, Y(p) + l.rowH - 1.5 * dpr); }
+      }
+      if (ref) {
+        g.strokeStyle = "#b8bfcc"; g.lineWidth = 1.5 * dpr;
+        for (const n of ref.notes) if ((n.voice || 0) === l.voice) g.strokeRect(X(n.onset), Y(n.pitch) + 1, Math.max(X(n.duration), 2), l.rowH - 2);
+      }
+      const col = VOICE_COLORS[l.voice % 4];
+      for (const n of S.notes) {
+        if (n.voice !== l.voice) continue;
+        const muted = n.muted || S.mutedVoices.has(n.voice);
+        const x = X(n.onset), y = Y(n.pitch) + l.rowH * 0.18, ww = Math.max(X(n.duration), 3), hh = l.rowH * 0.64;
+        g.globalAlpha = muted ? 1 : 0.35 + 0.65 * n.velocity;
+        if (muted) { g.strokeStyle = col; g.setLineDash([3 * dpr, 3 * dpr]); g.strokeRect(x, y, ww, hh); g.setLineDash([]); }
+        else { g.fillStyle = col; g.fillRect(x, y, ww, hh); }
+        g.globalAlpha = 1;
+      }
+    } else {
+      l.kinds.forEach((kind, i) => {
+        const y = l.body + i * l.rowH;
+        g.fillStyle = i % 2 ? "#1d2027" : "#252a33";
+        g.fillRect(0, y, w, l.rowH);
+        g.fillStyle = "#8d94a1"; g.font = `${9 * dpr}px system-ui`;
+        g.fillText(drumLabel(kind), 3 * dpr, y + l.rowH - 3 * dpr);
+      });
+      for (const hit of S.drumHits) {
+        const i = l.kinds.indexOf(hit.kind);
+        const muted = hit.muted || S.muteNoise;
+        const x = X(hit.onset), y = l.body + i * l.rowH + l.rowH * 0.18, ww = Math.max(5 * dpr, X(0.025)), hh = l.rowH * 0.64;
+        g.globalAlpha = muted ? 1 : 0.35 + 0.65 * Math.min(hit.velocity, 1);
+        if (muted) { g.strokeStyle = "#e6e8ec"; g.setLineDash([3 * dpr, 3 * dpr]); g.strokeRect(x, y, ww, hh); g.setLineDash([]); }
+        else { g.fillStyle = "#e6e8ec"; g.fillRect(x, y, ww, hh); }
+        g.globalAlpha = 1;
+      }
     }
   }
   g.strokeStyle = "#ffffff14"; g.lineWidth = dpr;
   for (let t = 0; t <= dur; t += 0.5) { g.beginPath(); g.moveTo(X(t), 0); g.lineTo(X(t), h); g.stroke(); }
-  const ref = S.job.result.reference;
-  if (ref) {
-    g.strokeStyle = "#b8bfcc"; g.lineWidth = 1.5 * dpr;
-    for (const n of ref.notes) g.strokeRect(X(n.onset), Y(n.pitch) + 1, Math.max(X(n.duration), 2), rowH - 2);
-  }
-  for (const n of S.notes) {
-    const col = VOICE_COLORS[n.voice % 4];
-    const muted = n.muted || S.mutedVoices.has(n.voice);
-    const x = X(n.onset), y = Y(n.pitch) + rowH * 0.18, ww = Math.max(X(n.duration), 3), hh = rowH * 0.64;
-    g.globalAlpha = muted ? 1 : 0.35 + 0.65 * n.velocity;
-    if (muted) { g.strokeStyle = col; g.setLineDash([3 * dpr, 3 * dpr]); g.strokeRect(x, y, ww, hh); g.setLineDash([]); }
-    else { g.fillStyle = col; g.fillRect(x, y, ww, hh); }
-    g.globalAlpha = 1;
-  }
 }
 
-function noteAt(ev) {
+// The note or drum hit under the mouse: {note} or {hit}, or null.
+function itemAt(ev) {
   const c = $("#roll");
   const rect = c.getBoundingClientRect();
-  const { lo, hi, dur } = rollLayout();
+  const { lanes, h, dur } = layoutRoll(c);
   const t = (ev.clientX - rect.left) / rect.width * dur;
-  const p = hi - Math.floor((ev.clientY - rect.top) / rect.height * (hi - lo + 1));
-  let best = null;
-  for (const n of S.notes) {
-    if (Math.round(n.pitch) === p && t >= n.onset - 0.02 && t <= n.onset + Math.max(n.duration, 0.05)) best = n;
+  const y = (ev.clientY - rect.top) / rect.height * h;
+  const l = lanes.find((x) => y >= x.body && y < x.bottom);
+  if (!l) return null;
+  const row = Math.floor((y - l.body) / l.rowH);
+  if (l.kind === "voice") {
+    const p = l.hi - row;
+    let best = null;
+    for (const n of S.notes) {
+      if (n.voice === l.voice && Math.round(n.pitch) === p && t >= n.onset - 0.02 && t <= n.onset + Math.max(n.duration, 0.05)) best = n;
+    }
+    return best && { note: best };
   }
-  return best;
+  const kind = l.kinds[row], slack = Math.max(0.03, 6 / rect.width * dur);
+  let best = null;
+  for (const hit of S.drumHits) {
+    if (hit.kind === kind && Math.abs(hit.onset + 0.0125 - t) <= slack && (!best || Math.abs(hit.onset - t) < Math.abs(best.onset - t))) best = hit;
+  }
+  return best && { hit: best };
 }
 
 function drawAll() {
@@ -850,6 +930,8 @@ function wire() {
   drop.ondragleave = () => drop.classList.remove("over");
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); file.files = e.dataTransfer.files; showFile(); };
 
+  // drums-only fits have no voices to count
+  $("#fit-mode").onchange = (e) => { $("#upload-form").elements.voices.disabled = e.target.value === "drums"; };
   $("#upload-form").onsubmit = async (e) => {
     e.preventDefault();
     const chosen = !!$("#track").value;
@@ -914,17 +996,21 @@ function wire() {
 
   const roll = $("#roll"), tip = $("#tooltip");
   roll.onclick = (e) => {
-    const n = noteAt(e);
-    if (!n) return;
-    n.muted = !n.muted;
+    const item = itemAt(e);
+    if (!item) return;
+    const x = item.note || item.hit;
+    x.muted = !x.muted;
     drawRoll(); showMetrics(); changed();
   };
   roll.onmousemove = (e) => {
-    const n = noteAt(e);
-    if (!n) { tip.hidden = true; return; }
+    const item = itemAt(e);
+    if (!item) { tip.hidden = true; return; }
     const rect = roll.getBoundingClientRect();
     tip.hidden = false;
-    tip.textContent = `${noteName(n.pitch)} (${n.pitch.toFixed(2)}) · ${n.onset.toFixed(3)} s · ${(n.duration * 1000).toFixed(0)} ms · vel ${n.velocity.toFixed(2)} · voice ${n.voice + 1}${n.muted ? " · muted" : ""}`;
+    const n = item.note, x = item.hit;
+    tip.textContent = n
+      ? `${noteName(n.pitch)} (${n.pitch.toFixed(2)}) · ${n.onset.toFixed(3)} s · ${(n.duration * 1000).toFixed(0)} ms · vel ${n.velocity.toFixed(2)} · voice ${n.voice + 1}${n.muted ? " · muted" : ""}`
+      : `${drumLabel(x.kind)} · ${x.onset.toFixed(3)} s · strength ${x.velocity.toFixed(2)}${x.muted ? " · muted" : ""}`;
     tip.style.left = Math.min(e.clientX - rect.left + 12, rect.width - 260) + "px";
     tip.style.top = (e.clientY - rect.top + 12) + "px";
   };
@@ -938,6 +1024,7 @@ function wire() {
   $("#reset-btn").onclick = () => {
     S.patches[S.voice] = JSON.parse(JSON.stringify(S.fitted[S.voice]));
     S.notes = S.job.result.notes.map((n) => ({ ...n, muted: false }));
+    S.drumHits.forEach((x) => { x.muted = false; });
     S.mutedVoices.clear();
     S.muteNoise = false;
     $("#noise-mute").checked = false;
@@ -954,7 +1041,9 @@ function wire() {
   };
   $("#exp-midi").onclick = async () => {
     const notes = S.notes.filter((n) => !n.muted && !S.mutedVoices.has(n.voice)).map(({ muted, ...n }) => n);
-    const r = await api("/api/midi", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes }) });
+    const drums = S.job.result.drums || [];
+    const drum_hits = S.muteNoise ? [] : S.drumHits.filter((x) => !x.muted && drums[x.kind]).map((x) => [drums[x.kind].gm, x.onset, x.velocity]);
+    const r = await api("/api/midi", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ notes, drum_hits }) });
     download(await r.blob(), baseName() + ".mid");
   };
   $("#exp-wav").onclick = () => { if (S.tweakedBlob) download(S.tweakedBlob, baseName() + "_tweaked.wav"); };
@@ -983,7 +1072,7 @@ async function main() {
     getPatch: () => S.patches[S.voice],
     getHarmonics: () => S.job.result.n_harmonics,
     getSampleRate: () => S.job.result.sr,
-    isActive: () => !$("#result-view").hidden && !!S.patches && !!S.job && !!S.job.result,
+    isActive: () => !$("#result-view").hidden && !!S.patches && S.patches.length > 0 && !!S.job && !!S.job.result,
     noteName,
     defaultSlide: () => !!(S.job && S.job.config.lead),
   });

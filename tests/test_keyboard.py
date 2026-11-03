@@ -364,3 +364,127 @@ def test_the_search_box_works_from_the_keyboard(track_results):
 def test_upload_is_still_there(track_results):
     u = track_results["upload"]
     assert u["track"] == "" and not u["dropHidden"] and u["button"] == "Upload and fit"
+
+
+# ---- the piano roll's lanes and drum hits, on the real page with the server's answers filled in
+
+def _wav_b64(seconds=1.0):
+    import base64
+    import io
+
+    import soundfile as sf
+
+    buf = io.BytesIO()
+    sf.write(buf, np.zeros(int(seconds * SR), dtype=np.float32), SR, format="WAV")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+DRUMS_DESCRIBED = [{"name": "kick", "gm": 36, "kit": "808"}, {"name": "rim", "gm": 37, "kit": "909"},
+                   {"name": "snare", "gm": 38, "kit": "909"}]
+
+
+def _job(job_id, patches, notes, drum_hits):
+    return {"id": job_id, "name": job_id, "kind": "upload", "status": "done", "stage": "", "step": 0, "total": 0, "progress": 1.0,
+            "loss_curve": [], "error": None, "elapsed_s": 1.0, "created": 1.0, "started": 1.0, "finished": 2.0,
+            "config": {"total_steps": 10},
+            "result": {"sr": SR, "n_samples": SR, "n_harmonics": 32, "patches": patches, "notes": notes, "roll_notes": notes,
+                       "final_loss": 1.0, "tuning_cents": 0.0, "has_noise": True, "drum_hits": drum_hits, "drums": DRUMS_DESCRIBED,
+                       "history": [], "reference": None}}
+
+
+ROLL_TEST = r"""
+const wav = Uint8Array.from(atob("%(wav)s"), (c) => c.charCodeAt(0));
+const jobs = %(jobs)s;
+window.requests = [];
+const realFetch = window.fetch;
+window.fetch = async (url, opts) => {
+  const path = String(url).split("?")[0];
+  if (opts && opts.method === "POST") requests.push({ path, body: opts.body });
+  if (path.endsWith(".wav") || path.endsWith("/render")) return new Response(wav.slice(), { status: 200, headers: { "X-Spectral-Loss": "1.0" } });
+  if (path === "/api/midi") return new Response(new Uint8Array([77, 84, 104, 100]), { status: 200 });
+  const job = path.match(/^\/api\/jobs\/(\w+)$/);
+  const reply = job ? jobs[job[1]] : { "/api/specs": %(specs)s, "/api/jobs": [], "/api/library": %(library)s }[path];
+  if (reply !== undefined) return new Response(JSON.stringify(reply), { status: 200 });
+  return realFetch(url, opts);
+};
+location.hash = "job=both";
+"""
+ROLL_RUN = """
+(async () => {
+  const until = async (test) => { for (let i = 0; i < 100 && !test(); i++) await new Promise((r) => setTimeout(r, 100)); };
+  await until(() => S.job && S.job.id === "both" && S.drumHits && document.querySelector("#roll").style.height);
+  const out = {};
+  out.lanes = rollLanes().map((l) => [l.title, l.rows]);
+  out.drumRows = rollLanes().find((l) => l.kind === "drums").kinds.map(drumLabel);
+  out.metrics = document.querySelector("#metrics").textContent;
+  out.synthShown = !document.querySelector(".card.synth").hidden;
+  // click the snare hit, where it is drawn
+  const c = document.querySelector("#roll"), rect = c.getBoundingClientRect();
+  const { lanes, h, dur } = layoutRoll(c);
+  const drums = lanes.find((l) => l.kind === "drums");
+  const hit = S.drumHits.find((x) => x.kind === 2);
+  const y = rect.top + (drums.body + drums.kinds.indexOf(2) * drums.rowH + drums.rowH / 2) / h * rect.height;
+  const x = rect.left + (hit.onset + 0.01) / dur * rect.width;
+  requests.length = 0;
+  c.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
+  out.muted = S.drumHits.filter((x) => x.muted).map((x) => [x.kind, x.onset]);
+  await until(() => requests.some((r) => r.path.endsWith("/render")));
+  out.rendered = JSON.parse(requests.find((r) => r.path.endsWith("/render")).body).drum_hits;
+  requests.length = 0;
+  document.querySelector("#exp-midi").click();
+  await until(() => requests.some((r) => r.path === "/api/midi"));
+  out.midi = JSON.parse(requests.find((r) => r.path === "/api/midi").body);
+  // a drums-only job: no voices to tweak or play
+  await selectJob("drums");
+  await until(() => S.job && S.job.id === "drums" && S.drumHits && S.drumHits.length === 1);
+  out.drumsOnly = { lanes: rollLanes().map((l) => l.title), synthHidden: document.querySelector(".card.synth").hidden,
+                    playHidden: document.querySelector(".card.play").hidden };
+  await realFetch("/roll", { method: "POST", body: JSON.stringify(out) });
+})().catch((e) => realFetch("/error", { method: "POST", body: String(e) + " " + e.stack }));
+"""
+
+
+@pytest.fixture(scope="module")
+def roll_results(tmp_path_factory):
+    static = os.path.dirname(KEYBOARD_JS)
+    with open(os.path.join(static, "index.html")) as f:
+        html = f.read()
+    with open(KEYBOARD_JS) as f:
+        keyboard = f.read()
+    with open(os.path.join(static, "app.js")) as f:
+        app = f.read()
+    patch = {**BASE, "waveform": BASE["waveform"]}
+    notes = [{"pitch": 60.0, "onset": 0.1, "duration": 0.3, "velocity": 0.8, "voice": 0},
+             {"pitch": 48.0, "onset": 0.5, "duration": 0.3, "velocity": 0.8, "voice": 1}]
+    jobs = {"both": _job("both", [patch, patch], notes, [[0, 0.0, 0.9], [2, 0.5, 0.7], [0, 0.75, 0.8]]),
+            "drums": _job("drums", [], [], [[0, 0.25, 0.9]])}
+    setup = ROLL_TEST % {"wav": _wav_b64(), "jobs": json.dumps(jobs), "specs": json.dumps(SPECS), "library": json.dumps(LIBRARY)}
+    html = html.replace('<script src="keyboard.js"></script>', f"<script>{setup}</script><script>{keyboard}</script>")
+    html = html.replace('<script src="app.js"></script>', f"<script>{app}</script><script>{ROLL_RUN}</script>")
+    return json.loads(_run_page_in_chrome(html, 1, tmp_path_factory.mktemp("chrome"))["/roll"])
+
+
+@needs_chrome
+def test_each_voice_and_the_drums_get_a_lane(roll_results):
+    r = roll_results
+    assert [title for title, _ in r["lanes"]] == ["Voice 1", "Voice 2", "Drums"]
+    assert r["lanes"][2][1] == 2 and r["drumRows"] == ["kick (808)", "snare (909)"]  # only drums that were hit
+    assert "3 drum hits" in r["metrics"] and "kick (808) 2" in r["metrics"] and r["synthShown"]
+
+
+@needs_chrome
+def test_clicking_a_drum_hit_mutes_it_in_the_render(roll_results):
+    r = roll_results
+    assert r["muted"] == [[2, 0.5]]
+    assert r["rendered"] == [[0, 0.0, 0.9], [0, 0.75, 0.8]]
+
+
+@needs_chrome
+def test_drums_go_to_midi_by_general_midi_note(roll_results):
+    assert roll_results["midi"]["drum_hits"] == [[36, 0.0, 0.9], [36, 0.75, 0.8]]
+
+
+@needs_chrome
+def test_a_drums_only_job_has_only_the_drum_lane(roll_results):
+    d = roll_results["drumsOnly"]
+    assert d["lanes"] == ["Drums"] and d["synthHidden"] and d["playHidden"]

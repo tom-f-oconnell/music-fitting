@@ -220,19 +220,22 @@ def _varlen(n: int) -> bytes:
     return bytes(reversed(out))
 
 
-def write_midi(notes: list[Note], path: str, tempo_bpm: float = 120.0, ticks_per_beat: int = 480) -> None:
+def write_midi(notes: list[Note], path: str, tempo_bpm: float = 120.0, ticks_per_beat: int = 480,
+               drums: list[tuple[int, float, float]] | None = None) -> None:
     """Write notes to a type-1 MIDI file, one track (and channel) per voice.
 
-    Fractional pitches are rounded; times are converted at a fixed tempo.
+    Fractional pitches are rounded; times are converted at a fixed tempo. Drum hits, as
+    (General MIDI drum note, time in s, strength 0..1), go on a last track on channel 10.
     """
     sec_per_tick = 60.0 / tempo_bpm / ticks_per_beat
     voices = sorted({n.voice for n in notes}) or [0]
     tracks = []
     tempo_us = int(60_000_000 / tempo_bpm)
-    for vi, voice in enumerate(voices):
+    drum_notes = [Note(float(gm), t, 0.05, v, -1) for gm, t, v in drums or []]
+    for vi, voice in enumerate(voices + ([-1] if drum_notes else [])):
         events = []
-        ch = vi % 16
-        for n in notes:
+        ch = 9 if voice == -1 else vi % 15 + (vi % 15 >= 9)  # channel 10 (9 from 0) is for drums
+        for n in notes + drum_notes:
             if n.voice != voice:
                 continue
             key = int(min(max(round(n.pitch), 0), 127))

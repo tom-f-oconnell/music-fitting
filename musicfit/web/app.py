@@ -115,11 +115,17 @@ class RenderRequest(BaseModel):
     notes: list[dict]
     muted_voices: list[int] = []
     mute_noise: bool = False  # leave out the fitted drums / noise floor
+    drum_hits: list[list[float]] | None = None  # [kind, time, strength] to play, or None for the drums as fitted
 
 
 class MidiRequest(BaseModel):
     notes: list[dict]
     tempo_bpm: float = 120.0
+    drum_hits: list[list[float]] = []  # [General MIDI drum note, time, strength]
+
+
+FIT_MODES = ("notes_and_drums", "notes", "drums")
+DRUM_KITS = ("808,909", "808", "909", "noise")  # the web app offers built-in kits only, never a path
 
 
 class DownloadRequest(BaseModel):
@@ -147,6 +153,10 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
     @functools.lru_cache(maxsize=8)
     def noise_of(job_id: str):
         return jobs.noise_audio(job_id)
+
+    @functools.lru_cache(maxsize=8)
+    def drums_of(job_id: str):
+        return jobs.drum_voice(job_id)
 
     def done_job(job_id: str):
         job = jobs.get(job_id)
@@ -190,17 +200,22 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
         full_memory: bool = Form(False),
         separate: bool = Form(False),
         basic_pitch: bool = Form(False),
+        fit_mode: str = Form("notes_and_drums"),
+        drum_kit: str = Form("808,909"),
     ):
         if not 0.25 <= duration <= MAX_DURATION_S:
             raise HTTPException(422, f"duration must be between 0.25 and {MAX_DURATION_S} s")
         if not 1 <= voices <= 4 or not 0 <= pitch_min < pitch_max <= 127:
             raise HTTPException(422, "1-4 voices and 0 <= pitch_min < pitch_max <= 127")
+        if fit_mode not in FIT_MODES or drum_kit not in DRUM_KITS:
+            raise HTTPException(422, f"fit_mode must be one of {FIT_MODES} and drum_kit one of {DRUM_KITS}")
         tools = available_tools()
         if (separate and not tools["demucs"]) or (basic_pitch and not tools["basic_pitch"]):
             raise HTTPException(422, "that tool is not installed; see requirements-tools.txt")
         cfg = dict(offset=max(offset, 0.0), duration=duration, voices=voices, roll_steps=max(roll_steps, 1),
                    note_steps=max(note_steps, 1), sparsity=sparsity, pitch_min=pitch_min, pitch_max=pitch_max,
-                   seed=seed, lead=lead, full_memory=full_memory, separate=separate, basic_pitch=basic_pitch)
+                   seed=seed, lead=lead, full_memory=full_memory, separate=separate, basic_pitch=basic_pitch,
+                   fit_mode=fit_mode, drum_kit=drum_kit)
         if track:
             return jobs.submit_library(library.title(track), library.resolve(track), cfg).public()
         if file is None:
@@ -288,9 +303,15 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
             raise HTTPException(422, f"expected {len(r['patches'])} patches")
         audio = render(req.patches, notes_from_dicts(req.notes), r["n_samples"], r["sr"], r["n_harmonics"],
                        set(req.muted_voices))
-        noise = None if req.mute_noise else noise_of(job_id)
-        if noise is not None:
-            audio = audio + noise[: audio.numel()]
+        drums = None
+        if not req.mute_noise:
+            voice = drums_of(job_id) if req.drum_hits is not None else None
+            if voice is not None:
+                drums = voice.render_hits([(int(k), float(t), float(v)) for k, t, v in req.drum_hits], r["n_samples"])
+            else:
+                drums = noise_of(job_id)
+        if drums is not None:
+            audio = audio + drums[: audio.numel()]
         loss = spectral_loss(audio, target_of(job_id))
         return Response(wav_bytes(audio, r["sr"]), media_type="audio/wav",
                         headers={"X-Spectral-Loss": f"{loss:.5f}", "Access-Control-Expose-Headers": "X-Spectral-Loss"})
@@ -300,7 +321,8 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
         fd, path = tempfile.mkstemp(suffix=".mid")
         os.close(fd)
         try:
-            write_midi(notes_from_dicts(req.notes), path, tempo_bpm=req.tempo_bpm)
+            write_midi(notes_from_dicts(req.notes), path, tempo_bpm=req.tempo_bpm,
+                       drums=[(int(g), float(t), float(v)) for g, t, v in req.drum_hits])
             with open(path, "rb") as f:
                 data = f.read()
         finally:
