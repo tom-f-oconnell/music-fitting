@@ -158,7 +158,6 @@
             <div id="voice-tabs" class="tabs"></div>
             <div class="spacer"></div>
             <label class="check"><input type="checkbox" id="voice-mute"> Mute voice</label>
-            <label class="check" id="noise-mute-wrap" hidden><input type="checkbox" id="noise-mute"> Mute drums &amp; noise</label>
             <button id="reset-btn" class="small">Reset to fitted</button>
           </div>
           <p class="hint legend"><i class="tick fit"></i> fitted value <span id="true-legend" hidden><i class="tick true"></i> ground truth</span> · hover over a parameter to see what it does</p>
@@ -189,6 +188,17 @@
             <div class="meter" title="Output level. If this moves but you hear nothing, check your computer's sound output and volume."><div id="kbd-meter"></div></div>
           </div>
           <p class="hint">Plays the patch above, as it is now, for the voice selected there. The keys are laid out like Ableton Live's computer MIDI keyboard: A to &#39; are the white keys and W E T Y U O P the black ones, starting from middle C (which Ableton calls C3), with Z/X for the octave and C/V for the velocity. Drums aren't included.</p>
+        </section>
+
+        <section class="card drums" hidden>
+          <div class="synth-head">
+            <h2>Drums</h2>
+            <div class="spacer"></div>
+            <label class="check"><input type="checkbox" id="noise-mute"> Mute drums &amp; noise</label>
+            <button id="drum-reset-btn" class="small">Reset to fitted</button>
+          </div>
+          <p class="hint legend"><i class="tick fit"></i> fitted value · hover over a setting to see what it does · one box per drum that was hit</p>
+          <div id="drum-sliders" class="slider-grid"></div>
         </section>
 
         <section class="card exports">

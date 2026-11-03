@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..dataset.library import Library
+from ..drums import KIT_SPECS, KERNEL_SPECS
 from ..notes import write_midi
 from ..synth import PARAM_SPECS, WAVEFORMS
 from ..tools import available_tools
@@ -87,6 +88,28 @@ PARAM_HELP = {
     "gain": "This voice's overall volume, applied after everything else.",
 }
 
+# The drums' sliders: a kit's drums, and the generic voice's sounds.
+DRUM_PARAMS = {
+    "kit": [
+        ("level", "", "How loud this drum is: the peak of its hardest hit."),
+        ("tune", "st", "Plays the drum higher or lower, in semitones, by playing its sample faster or slower, "
+                       "so higher is also shorter."),
+        ("decay", "/s", "Shortens the drum's tail below 0, or lets it ring a little longer above: this much is "
+                        "added to how fast it fades, per second."),
+    ],
+    "noise": [
+        ("level", "", "How loud this sound is: the peak of its hardest hit."),
+        ("noise_decay", "s", "How long the noise burst rings: the time it takes to fade to about a third."),
+        ("tone_level", "", "How loud the tone is next to the noise: 0 is all noise, like a hat or snare; "
+                           "1 is mostly tone, like a kick."),
+        ("tone_decay", "s", "How long the tone rings."),
+        ("sweep_start", "Hz", "The pitch the tone starts at, as a kick's does before it drops."),
+        ("sweep_end", "Hz", "The pitch the tone drops to."),
+        ("sweep_time", "s", "How quickly the tone drops from its start to its end pitch."),
+    ],
+}
+KIT_HELP = "Which drum machine's version of this drum to play."
+
 
 class RevalidatedStaticFiles(StaticFiles):
     """Static files that browsers must check for changes before reusing a saved copy.
@@ -114,7 +137,9 @@ class RenderRequest(BaseModel):
     notes: list[dict]
     muted_voices: list[int] = []
     mute_noise: bool = False  # leave out the fitted drums / noise floor
-    drum_hits: list[list[float]] | None = None  # [kind, time, strength] to play, or None for the drums as fitted
+    drum_hits: list[list[float]] | None = None  # [kind, time, strength] to play instead of the drums as fitted
+    muted_drum_hits: list[list[float]] = []  # [kind, time] of fitted hits to leave out
+    drum_settings: list[dict[str, float | str]] | None = None  # per kind, values for its sliders (drums.render_hits)
 
 
 class MidiRequest(BaseModel):
@@ -176,6 +201,11 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
             "waveform_help": WAVEFORM_HELP,
             "max_duration_s": MAX_DURATION_S,
             "tools": available_tools(),
+            "drum_params": {voice: {n: {"low": s.low, "high": s.high, "default": s.default, "log": s.log, "unit": unit,
+                                        "help": help_text}
+                                    for n, unit, help_text in params for s in [specs[n]]}
+                            for (voice, params), specs in zip(DRUM_PARAMS.items(), (KIT_SPECS, KERNEL_SPECS))},
+            "kit_help": KIT_HELP,
         }
 
     @app.get("/api/jobs")
@@ -304,9 +334,13 @@ def create_app(jobs_dir: str | None = None, data_dir: str | None = None) -> Fast
                        set(req.muted_voices))
         drums = None
         if not req.mute_noise:
-            voice = drums_of(job_id) if req.drum_hits is not None else None
-            if voice is not None:
-                drums = voice.render_hits([(int(k), float(t), float(v)) for k, t, v in req.drum_hits], r["n_samples"])
+            voice = drums_of(job_id)  # None for jobs from before drums could be edited
+            if voice is not None and req.drum_hits is not None:
+                drums = voice.render_hits([(int(k), float(t), float(v)) for k, t, v in req.drum_hits], r["n_samples"],
+                                          settings=req.drum_settings)
+            elif voice is not None:
+                drums = voice.render_fitted(r["n_samples"], req.drum_settings,
+                                            [(int(m[0]), float(m[1])) for m in req.muted_drum_hits if len(m) >= 2])
             else:
                 drums = noise_of(job_id)
         if drums is not None:

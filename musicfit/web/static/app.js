@@ -244,11 +244,12 @@ async function showResult(job) {
   S.patches = saved && saved.patches && saved.patches.length === r.patches.length ? saved.patches : JSON.parse(JSON.stringify(r.patches));
   S.notes = (saved && saved.notes) || r.notes.map((n) => ({ ...n, muted: false }));
   S.drumHits = (saved && saved.drumHits) || (r.drum_hits || []).map(([kind, onset, velocity]) => ({ kind, onset, velocity, muted: false }));
+  S.drumSettings = (saved && saved.drumSettings) || fittedDrumSettings();
   // drums-only fits have no voices: nothing to tweak or play
   document.querySelector(".card.synth").hidden = document.querySelector(".card.play").hidden = !r.patches.length;
   S.mutedVoices = new Set((saved && saved.mutedVoices) || []);
   S.muteNoise = !!(saved && saved.muteNoise);
-  $("#noise-mute-wrap").hidden = !r.has_noise;
+  document.querySelector(".card.drums").hidden = !r.has_noise;
   $("#noise-mute").checked = S.muteNoise;
   S.voice = 0;
   $("#result-view").hidden = false;
@@ -257,6 +258,7 @@ async function showResult(job) {
   $("#true-legend").hidden = !r.reference;
   buildVoiceTabs();
   buildSliders();
+  buildDrumSliders();
   showMetrics();
   const ctx = audioCtx();
   const [t, f] = await Promise.all(["target", "fit"].map(async (w) => {
@@ -291,7 +293,8 @@ function showMetrics() {
 }
 
 function persist() {
-  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, drumHits: S.drumHits, mutedVoices: [...S.mutedVoices], muteNoise: S.muteNoise });
+  if (S.job) store("musicfit:" + S.job.id, { patches: S.patches, notes: S.notes, drumHits: S.drumHits, drumSettings: S.drumSettings,
+                                             mutedVoices: [...S.mutedVoices], muteNoise: S.muteNoise });
 }
 
 // ---------------------------------------------------------------- sliders
@@ -380,6 +383,61 @@ function buildSliders() {
   }
 }
 
+// ---------------------------------------------------------------- drum sliders
+
+// Which sliders a job's drums have: a kit's drums, or the generic voice's sounds (null for jobs from before either)
+function drumVoiceKind() {
+  const d = (S.job.result.drums || [])[0];
+  if (!d || !("level" in d)) return null;
+  return "tune" in d ? "kit" : "noise";
+}
+
+function fittedDrumSettings() {
+  const kind = drumVoiceKind();
+  if (!kind) return null;
+  const names = Object.keys(S.specs.drum_params[kind]);
+  return S.job.result.drums.map((d) => {
+    const s = Object.fromEntries(names.map((n) => [n, d[n]]));
+    if (kind === "kit") s.kit = d.kit;
+    return s;
+  });
+}
+
+function buildDrumSliders() {
+  const grid = $("#drum-sliders");
+  grid.innerHTML = "";
+  const kind = drumVoiceKind();
+  const kinds = [...new Set(S.drumHits.map((h) => h.kind))].sort((a, b) => a - b);
+  if (!kind || !S.drumSettings || !kinds.length) {
+    grid.innerHTML = `<p class="hint">${kind ? "No drum hits were found." : "This job is from before drums could be adjusted; fit it again to get sliders."}</p>`;
+    return;
+  }
+  const drums = S.job.result.drums, specs = S.specs.drum_params[kind];
+  for (const k of kinds) {
+    const box = document.createElement("div");
+    box.className = "group";
+    box.innerHTML = "<h3></h3>";
+    const title = box.querySelector("h3");
+    title.textContent = drumLabel(k);
+    const s = S.drumSettings[k], f = drums[k];
+    if (kind === "kit" && (f.kits || []).length > 1) {
+      const row = document.createElement("label");
+      row.className = "slider kit";
+      row.title = S.specs.kit_help;
+      row.innerHTML = '<span class="pname">kit</span><select></select>';
+      const sel = row.querySelector("select");
+      for (const name of f.kits) sel.add(new Option(name + (name === f.kit ? " (fitted)" : ""), name));
+      sel.value = s.kit;
+      sel.onchange = () => { s.kit = sel.value; title.textContent = drumLabel(k); drawRoll(); changed(); };
+      box.appendChild(row);
+    }
+    for (const [name, spec] of Object.entries(specs)) {
+      box.appendChild(sliderRow(name.replace(/_/g, " "), spec, spec.help, () => s[name], (x) => { s[name] = x; }, f[name], null));
+    }
+    grid.appendChild(box);
+  }
+}
+
 function changed() {
   persist();
   scheduleRender(120);
@@ -406,7 +464,8 @@ async function renderTweaked() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ patches: S.patches, notes, muted_voices: [...S.mutedVoices], mute_noise: S.muteNoise,
-                             drum_hits: (S.job.result.drums || []).length ? S.drumHits.filter((x) => !x.muted).map((x) => [x.kind, x.onset, x.velocity]) : null }),
+                             muted_drum_hits: S.drumHits.filter((x) => x.muted).map((x) => [x.kind, x.onset]),
+                             drum_settings: S.drumSettings || null }),
       signal: S.renderAbort.signal,
     });
     const loss = r.headers.get("X-Spectral-Loss");
@@ -601,7 +660,8 @@ function layoutRoll(c) {
 
 function drumLabel(kind) {
   const d = (S.job.result.drums || [])[kind];
-  return d ? d.name + (d.kit ? ` (${d.kit})` : "") : `drum ${kind + 1}`;
+  const kit = (S.drumSettings && S.drumSettings[kind] && S.drumSettings[kind].kit) || (d && d.kit);
+  return d ? d.name + (kit ? ` (${kit})` : "") : `drum ${kind + 1}`;
 }
 
 function drawRoll() {
@@ -1045,15 +1105,20 @@ function wire() {
   $("#reset-btn").onclick = () => {
     S.patches[S.voice] = JSON.parse(JSON.stringify(S.fitted[S.voice]));
     S.notes = S.job.result.notes.map((n) => ({ ...n, muted: false }));
-    S.drumHits.forEach((x) => { x.muted = false; });
     S.mutedVoices.clear();
+    buildSliders(); drawRoll(); showMetrics(); changed();
+  };
+  $("#drum-reset-btn").onclick = () => {
+    S.drumSettings = fittedDrumSettings();
+    S.drumHits.forEach((x) => { x.muted = false; });
     S.muteNoise = false;
     $("#noise-mute").checked = false;
-    buildSliders(); drawRoll(); showMetrics(); changed();
+    buildDrumSliders(); drawRoll(); showMetrics(); changed();
   };
 
   $("#exp-patch").onclick = () => {
     const out = { format: "musicfit-patch", version: 1, sr: S.job.result.sr, voices: S.patches };
+    if (S.drumSettings) out.drums = S.drumSettings.map((s, k) => ({ name: S.job.result.drums[k].name, ...s }));
     download(new Blob([JSON.stringify(out, null, 2)], { type: "application/json" }), baseName() + "_patch.json");
   };
   $("#exp-notes").onclick = () => {
@@ -1080,7 +1145,17 @@ function wire() {
         for (const [k, spec] of Object.entries(S.specs.params)) merged[k] = Math.min(Math.max(+merged[k], spec.low), spec.high);
         S.patches[i] = merged;
       });
-      buildSliders(); changed();
+      // drums by name, so a patch from another fit sets the drums both have
+      const kind = drumVoiceKind();
+      for (const drum of (kind && S.drumSettings && Array.isArray(d.drums)) ? d.drums : []) {
+        const k = S.job.result.drums.findIndex((x) => x.name === drum.name);
+        if (k < 0) continue;
+        for (const [name, spec] of Object.entries(S.specs.drum_params[kind])) {
+          if (drum[name] != null && Number.isFinite(+drum[name])) S.drumSettings[k][name] = Math.min(Math.max(+drum[name], spec.low), spec.high);
+        }
+        if (kind === "kit" && (S.job.result.drums[k].kits || []).includes(drum.kit)) S.drumSettings[k].kit = drum.kit;
+      }
+      buildSliders(); buildDrumSliders(); drawRoll(); changed();
     } catch (err) { alert("Could not read patch: " + err.message); }
   };
 

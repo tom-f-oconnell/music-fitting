@@ -78,11 +78,24 @@ def _decode_hits(v: torch.Tensor, frame_hop_s: float, threshold: float, merge_fr
     return sorted(out, key=lambda h: h[1])
 
 
+def _with_settings(p: dict[str, torch.Tensor], settings: list[dict] | None, specs: dict[str, ParamSpec]) -> dict[str, torch.Tensor]:
+    """Fitted values ``p`` ([kinds] each) with some replaced by ``settings``, kept within their ranges."""
+    if not settings:
+        return p
+    p = {k: v.detach().clone() for k, v in p.items()}
+    for d, s in enumerate(settings[: len(next(iter(p.values())))]):
+        for k, v in (s or {}).items():
+            if k in specs and isinstance(v, (int, float)) and math.isfinite(v):
+                p[k][d] = min(max(float(v), specs[k].low), specs[k].high)
+    return p
+
+
 class _DrumVoice(nn.Module):
     """What both drum voices share: the roll, the noise floor, playing hits, and saving."""
 
     names: list[str]  # one per kind
     gm_notes: list[int]  # General MIDI drum note of each kind, for MIDI files
+    SETTINGS: dict[str, ParamSpec]  # what can be changed per kind when playing hits (render_hits)
     hit_threshold: float = 0.3  # what hits() counts as a hit, unless told otherwise
 
     def _init_shared(self, n_kinds: int, n_frames: int, frame_hop_s: float, sr: int, noise_floor: bool, init_logit: float,
@@ -120,10 +133,46 @@ class _DrumVoice(nn.Module):
         threshold = self.hit_threshold if threshold is None else threshold
         return _decode_hits(self.strengths(), self.frame_hop_s, threshold, merge_frames)
 
+    def _layers(self, kind: int) -> tuple[list[int], int]:
+        """The rows a hit of ``kind`` sounds from, and how many frames either side of it."""
+        return [kind], 3
+
     @torch.no_grad()
-    def render_hits(self, hits: list[tuple[int, float, float]], n_samples: int, floor: bool = True) -> torch.Tensor:
-        """Play a list of hits, e.g. an edited copy of hits(); the noise floor too unless floor is False."""
-        h = self.kernels()
+    def render_fitted(self, n_samples: int, settings: list[dict] | None = None,
+                      muted: list[tuple[int, float]] | None = None, floor: bool = True) -> torch.Tensor:
+        """The drums as fitted: all of the roll, not just the hits picked from it.
+
+        The hits hold only part of the roll (half of it, on a real clip), and the rest is sound
+        too, so this is what an edit should start from.
+
+        Args:
+            settings: as for :meth:`render_hits`.
+            muted: hits to leave out, as (kind, time in s) from :meth:`hits`; the roll around each
+                goes silent, with the layers of other drums that hits() merged into it.
+            floor: include the noise floor.
+        """
+        v = self.strengths().clone()
+        for kind, t in muted or []:
+            if not 0 <= int(kind) < v.shape[0]:
+                continue
+            rows, width = self._layers(int(kind))
+            m = int(round(float(t) / self.frame_hop_s))
+            v[rows, max(0, m - width): max(0, m + width + 1)] = 0.0
+        out = _render_roll(v, self.kernels(settings), self.frame_hop_s, self.sr, n_samples)
+        if floor and self.noise_floor:
+            out = out + self._floor(n_samples, v.device)
+        return out
+
+    @torch.no_grad()
+    def render_hits(self, hits: list[tuple[int, float, float]], n_samples: int, floor: bool = True,
+                    settings: list[dict] | None = None) -> torch.Tensor:
+        """Play a list of hits, e.g. an edited copy of hits(); the noise floor too unless floor is False.
+
+        Args:
+            settings: per kind, values to play it with instead of the fitted ones, named as in
+                ``SETTINGS`` (and, for a kit, "kit": the kit's name), as the sliders set them.
+        """
+        h = self.kernels(settings)
         impulses = torch.zeros(h.shape[0], n_samples, device=h.device)
         for kind, t, strength in hits:
             i = int(round(t * self.sr))
@@ -152,6 +201,8 @@ def load_drum_voice(path: str) -> "_DrumVoice":
 
 class NoiseVoice(_DrumVoice):
     """Drum kinds of its own making: band-shaped noise and a swept sine (the drum voice before kits)."""
+
+    SETTINGS = KERNEL_SPECS
 
     def __init__(self, n_frames: int, frame_hop_s: float, sr: int, n_kinds: int = 3, n_bands: int = 16,
                  kernel_s: float = 0.5, noise_floor: bool = True, init_logit: float = -5.0, init_noise: float = 0.5,
@@ -183,15 +234,19 @@ class NoiseVoice(_DrumVoice):
     def from_args(cls, args: dict) -> "NoiseVoice":
         return cls(**args)
 
+    @torch.no_grad()
     def describe(self) -> list[dict]:
-        return [{"name": n, "gm": g, "kit": ""} for n, g in zip(self.names, self.gm_notes)]
-
-    def values(self) -> dict[str, torch.Tensor]:
-        return {k: spec.from_unit(torch.sigmoid(self.raw[k])) for k, spec in KERNEL_SPECS.items()}
-
-    def kernels(self) -> torch.Tensor:
-        """One waveform per kind, [K, L], with peak `level`."""
         p = self.values()
+        return [{"name": n, "gm": g, "kit": "", **{k: round(float(v[d]), 4) for k, v in p.items()}}
+                for d, (n, g) in enumerate(zip(self.names, self.gm_notes))]
+
+    def values(self, settings: list[dict] | None = None) -> dict[str, torch.Tensor]:
+        p = {k: spec.from_unit(torch.sigmoid(self.raw[k])) for k, spec in KERNEL_SPECS.items()}
+        return _with_settings(p, settings, KERNEL_SPECS)
+
+    def kernels(self, settings: list[dict] | None = None) -> torch.Tensor:
+        """One waveform per kind, [K, L], with peak `level`."""
+        p = self.values(settings)
         K, L = self.kernel_noise.shape
         t = torch.arange(L, device=self.kernel_noise.device) / self.sr
         freqs = torch.fft.rfftfreq(L, 1.0 / self.sr, device=t.device)
@@ -221,6 +276,8 @@ class KitVoice(_DrumVoice):
     also has a level, a tuning and a change to its decay, like a drum machine's knobs.
     """
 
+    SETTINGS = KIT_SPECS
+
     def __init__(self, n_frames: int, frame_hop_s: float, sr: int, kit: Kit, noise_floor: bool = False,
                  init_logit: float = -5.0, init_noise: float = 0.5, generator: torch.Generator | None = None, seed: int = 0):
         super().__init__()
@@ -241,11 +298,20 @@ class KitVoice(_DrumVoice):
         kit = Kit(args["names"], args["kit_names"], torch.zeros(C, K, L), torch.ones(C, K, dtype=torch.bool))
         return cls(args["n_frames"], args["frame_hop_s"], args["sr"], kit, args["noise_floor"])
 
-    def values(self) -> dict[str, torch.Tensor]:
-        return {k: spec.from_unit(torch.sigmoid(self.raw[k])) for k, spec in KIT_SPECS.items()}
+    def values(self, settings: list[dict] | None = None) -> dict[str, torch.Tensor]:
+        p = {k: spec.from_unit(torch.sigmoid(self.raw[k])) for k, spec in KIT_SPECS.items()}
+        return _with_settings(p, settings, KIT_SPECS)
 
-    def kit_weights(self) -> torch.Tensor:
-        return torch.softmax(self.kit_logits.masked_fill(~self.available, -1e4), dim=1)
+    def kit_weights(self, settings: list[dict] | None = None) -> torch.Tensor:
+        """[drums, kits]: how much of each kit's version each drum plays; settings can choose one by name."""
+        w = torch.softmax(self.kit_logits.masked_fill(~self.available, -1e4), dim=1)
+        for d, s in enumerate((settings or [])[: len(self.names)]):
+            kit = (s or {}).get("kit")
+            if kit in self.kit_names and self.available[d, self.kit_names.index(kit)]:
+                w = w.detach().clone() if w.requires_grad else w
+                w[d] = 0.0
+                w[d, self.kit_names.index(kit)] = 1.0
+        return w
 
     @torch.no_grad()
     def commit(self) -> None:
@@ -254,8 +320,8 @@ class KitVoice(_DrumVoice):
         self.kit_logits.copy_(torch.full_like(self.kit_logits, -1e4).scatter(1, best, 0.0))
         self.kit_logits.requires_grad_(False)
 
-    def kernels(self) -> torch.Tensor:
-        p = self.values()
+    def kernels(self, settings: list[dict] | None = None) -> torch.Tensor:
+        p = self.values(settings)
         C, K, L = self.samples.shape
         n = torch.arange(L, device=self.samples.device, dtype=torch.float32)
         # retuning by reading the sample faster or slower; positions stay continuous, so tune gets a gradient
@@ -265,9 +331,13 @@ class KitVoice(_DrumVoice):
         idx = i0[:, None, :].expand(C, K, L)
         warped = self.samples.gather(2, idx) * (1 - frac) + self.samples.gather(2, (idx + 1).clamp(max=L - 1)) * frac
         warped = warped * (n[None, None, :] < (L - 1) / torch.pow(2.0, p["tune"] / 12.0)[:, None, None])
-        h = (self.kit_weights()[:, :, None] * warped).sum(1)  # [C, L]
+        h = (self.kit_weights(settings)[:, :, None] * warped).sum(1)  # [C, L]
         t = n / self.sr
         return h * torch.exp(p["decay"][:, None] * t[None, :]) * p["level"][:, None]
+
+    def _layers(self, kind: int) -> tuple[list[int], int]:
+        group = GROUP[self.names[kind]]
+        return [j for j, n in enumerate(self.names) if GROUP[n] == group], max(3, int(round(0.05 / self.frame_hop_s)))
 
     def hits(self, threshold: float | None = None, merge_frames: int = 3, group_s: float = 0.05) -> list[tuple[int, float, float]]:
         """Peak-picked hits, keeping only the strongest of a group's drums within ``group_s``.
@@ -286,5 +356,6 @@ class KitVoice(_DrumVoice):
     def describe(self) -> list[dict]:
         p, w = self.values(), self.kit_weights()
         return [{"name": name, "gm": gm, "kit": self.kit_names[int(w[d].argmax())], "kit_weight": round(float(w[d].max()), 3),
+                 "kits": [k for j, k in enumerate(self.kit_names) if self.available[d, j]],
                  "level": round(float(p["level"][d]), 4), "tune": round(float(p["tune"][d]), 3), "decay": round(float(p["decay"][d]), 3)}
                 for d, (name, gm) in enumerate(zip(self.names, self.gm_notes))]

@@ -72,6 +72,26 @@ def test_demo_job_render_and_exports(client):
     w, _ = sf.read(io.BytesIO(only_noise.content))
     assert np.abs(w).max() > 0
 
+    # the drums' sliders: a kick at the fitted settings, louder, and from the other kit
+    drums = r["drums"]
+    kick = next(i for i, d in enumerate(drums) if d["name"] == "kick")
+
+    def drums_alone(settings):
+        resp = client.post(f"/api/jobs/{job['id']}/render", json={
+            "patches": r["patches"], "notes": notes, "muted_voices": [0], "drum_hits": [[kick, 0.3, 1.0]], "drum_settings": settings})
+        assert resp.status_code == 200
+        return sf.read(io.BytesIO(resp.content))[0]
+
+    fitted = [{"level": d["level"], "tune": d["tune"], "decay": d["decay"], "kit": d["kit"]} for d in drums]
+    as_fitted = drums_alone(None)
+    assert np.abs(as_fitted).max() > 0 and np.allclose(drums_alone(fitted), as_fitted, atol=1e-3)
+    louder = [dict(x) for x in fitted]
+    louder[kick]["level"] = 2 * fitted[kick]["level"]
+    assert np.allclose(drums_alone(louder), 2 * as_fitted, atol=2e-3)
+    other = [dict(x) for x in fitted]
+    other[kick]["kit"] = next(k for k in drums[kick]["kits"] if k != drums[kick]["kit"])
+    assert not np.allclose(drums_alone(other), as_fitted, atol=1e-2)
+
     midi = client.post("/api/midi", json={"notes": notes})
     assert midi.status_code == 200 and midi.content[:4] == b"MThd"
 
@@ -217,8 +237,13 @@ def test_browsers_must_check_static_files_for_changes(client, path):
 
 
 def test_every_slider_has_hover_text(client):
+    from musicfit.drums import KitVoice, NoiseVoice
+
     specs = client.get("/api/specs").json()
     assert all(p["help"] for p in specs["params"].values())
+    for voice, cls in (("kit", KitVoice), ("noise", NoiseVoice)):
+        assert set(specs["drum_params"][voice]) == set(cls.SETTINGS) and all(p["help"] for p in specs["drum_params"][voice].values())
+    assert specs["kit_help"]
     assert {name for g in specs["groups"] for name in g["params"]} == set(specs["params"])
     assert all(specs["waveform_help"][w] for w in specs["waveforms"])
 

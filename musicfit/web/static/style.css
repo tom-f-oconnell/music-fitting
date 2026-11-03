@@ -91,6 +91,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-
 .slider { display: grid; grid-template-columns: 92px 1fr 74px; align-items: center; gap: 8px; margin: 4px 0; font-size: 12px; }
 .slider .pname { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 .slider .track { position: relative; height: 22px; }
+.slider.kit select { grid-column: 2 / 4; font-size: 12px; padding: 2px 4px; }
 .slider input[type=range] { width: 100%; margin: 0; position: absolute; top: 3px; accent-color: var(--accent); }
 .slider .mark { position: absolute; top: 0; width: 2px; height: 6px; border-radius: 1px; pointer-events: none; }
 .slider .mark.fit { background: var(--fit); } .slider .mark.true { background: var(--true); top: 16px; }

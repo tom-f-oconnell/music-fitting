@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from musicfit.loss import MultiResolutionSTFTLoss  # noqa: E402
 from musicfit.notes import Note  # noqa: E402
+from musicfit.drums import KIT_SPECS  # noqa: E402
 from musicfit.synth import PARAM_SPECS  # noqa: E402
 
 pytest.importorskip("fastapi")
@@ -271,7 +272,10 @@ LIBRARY = {
     ],
     "sources": [], "presets": [], "downloads": [], "can_use_youtube": False,
 }
-SPECS = {"params": {}, "groups": [], "waveforms": [], "waveform_help": {}, "max_duration_s": 120, "tools": {"demucs": False, "basic_pitch": False}}
+SPECS = {"params": {}, "groups": [], "waveforms": [], "waveform_help": {}, "max_duration_s": 120, "tools": {"demucs": False, "basic_pitch": False},
+         "drum_params": {"kit": {n: {"low": KIT_SPECS[n].low, "high": KIT_SPECS[n].high, "default": KIT_SPECS[n].default,
+                                     "log": KIT_SPECS[n].log, "unit": "", "help": n + " help"} for n in KIT_SPECS}},
+         "kit_help": "kit help"}
 
 TRACKS_TEST = """
 const realFetch = window.fetch;
@@ -379,8 +383,8 @@ def _wav_b64(seconds=1.0):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-DRUMS_DESCRIBED = [{"name": "kick", "gm": 36, "kit": "808"}, {"name": "rim", "gm": 37, "kit": "909"},
-                   {"name": "snare", "gm": 38, "kit": "909"}]
+DRUMS_DESCRIBED = [{"name": name, "gm": gm, "kit": kit, "kits": ["808", "909"], "level": 0.3, "tune": 0.0, "decay": -2.0}
+                   for name, gm, kit in (("kick", 36, "808"), ("rim", 37, "909"), ("snare", 38, "909"))]
 
 
 def _job(job_id, patches, notes, drum_hits):
@@ -429,16 +433,31 @@ ROLL_RUN = """
   c.dispatchEvent(new MouseEvent("click", { clientX: x, clientY: y, bubbles: true }));
   out.muted = S.drumHits.filter((x) => x.muted).map((x) => [x.kind, x.onset]);
   await until(() => requests.some((r) => r.path.endsWith("/render")));
-  out.rendered = JSON.parse(requests.find((r) => r.path.endsWith("/render")).body).drum_hits;
+  out.rendered = JSON.parse(requests.find((r) => r.path.endsWith("/render")).body).muted_drum_hits;
   requests.length = 0;
   document.querySelector("#exp-midi").click();
   await until(() => requests.some((r) => r.path === "/api/midi"));
   out.midi = JSON.parse(requests.find((r) => r.path === "/api/midi").body);
+  // the drums' sliders: one box per drum that was hit; a louder kick from the other kit, then back
+  const boxes = () => [...document.querySelectorAll("#drum-sliders .group")];
+  out.drumBoxes = boxes().map((b) => [b.querySelector("h3").textContent, [...b.querySelectorAll(".pname")].map((p) => p.textContent)]);
+  out.drumCardShown = !document.querySelector(".card.drums").hidden;
+  requests.length = 0;
+  const level = boxes()[0].querySelectorAll("input[type=range]")[0];
+  level.value = 900; level.dispatchEvent(new Event("input"));
+  const kit = boxes()[0].querySelector("select");
+  kit.value = "909"; kit.dispatchEvent(new Event("change"));
+  await until(() => requests.some((r) => r.path.endsWith("/render") && JSON.parse(r.body).drum_settings[0].kit === "909"));
+  out.tweaked = { sent: JSON.parse(requests.filter((r) => r.path.endsWith("/render")).pop().body).drum_settings,
+                  title: boxes()[0].querySelector("h3").textContent, lane: rollLanes().find((l) => l.kind === "drums").kinds.map(drumLabel) };
+  document.querySelector("#drum-reset-btn").click();
+  out.reset = { settings: S.drumSettings, title: boxes()[0].querySelector("h3").textContent, muted: S.drumHits.filter((x) => x.muted).length };
   // a drums-only job: no voices to tweak or play
   await selectJob("drums");
   await until(() => S.job && S.job.id === "drums" && S.drumHits && S.drumHits.length === 1);
   out.drumsOnly = { lanes: rollLanes().map((l) => l.title), synthHidden: document.querySelector(".card.synth").hidden,
-                    playHidden: document.querySelector(".card.play").hidden };
+                    playHidden: document.querySelector(".card.play").hidden, drumsShown: !document.querySelector(".card.drums").hidden,
+                    drumBoxes: [...document.querySelectorAll("#drum-sliders .group h3")].map((h) => h.textContent) };
   await realFetch("/roll", { method: "POST", body: JSON.stringify(out) });
 })().catch((e) => realFetch("/error", { method: "POST", body: String(e) + " " + e.stack }));
 """
@@ -476,7 +495,7 @@ def test_each_voice_and_the_drums_get_a_lane(roll_results):
 def test_clicking_a_drum_hit_mutes_it_in_the_render(roll_results):
     r = roll_results
     assert r["muted"] == [[2, 0.5]]
-    assert r["rendered"] == [[0, 0.0, 0.9], [0, 0.75, 0.8]]
+    assert r["rendered"] == [[2, 0.5]]
 
 
 @needs_chrome
@@ -488,6 +507,7 @@ def test_drums_go_to_midi_by_general_midi_note(roll_results):
 def test_a_drums_only_job_has_only_the_drum_lane(roll_results):
     d = roll_results["drumsOnly"]
     assert d["lanes"] == ["Drums"] and d["synthHidden"] and d["playHidden"]
+    assert d["drumsShown"] and d["drumBoxes"] == ["kick (808)"]  # the mute and the sliders are with the drums
 
 
 # ---- deleting jobs from the list
@@ -580,3 +600,15 @@ def test_drums_only_fits_use_demucs_if_installed_unless_chosen_by_hand(list_resu
     # [Demucs ticked, voices disabled, drum kit disabled] after choosing each fit mode
     assert list_results["modes"] == [[True, True, False], [False, False, True], [False, False, False]]
     assert list_results["chosen"] == [[True, True, False], [True, False, True]]  # ticked by hand: left alone
+
+
+@needs_chrome
+def test_drums_get_sliders_of_their_own(roll_results):
+    r = roll_results
+    assert r["drumCardShown"]
+    assert r["drumBoxes"] == [["kick (808)", ["kit", "level", "tune", "decay"]], ["snare (909)", ["kit", "level", "tune", "decay"]]]
+    sent = r["tweaked"]["sent"]
+    assert sent[0]["kit"] == "909" and sent[0]["level"] == pytest.approx(0.01 * 200 ** 0.9, rel=1e-3) and sent[2] == {"level": 0.3, "tune": 0.0, "decay": -2.0, "kit": "909"}
+    assert r["tweaked"]["title"] == "kick (909)" and r["tweaked"]["lane"] == ["kick (909)", "snare (909)"]
+    assert r["reset"]["settings"][0] == {"level": 0.3, "tune": 0.0, "decay": -2.0, "kit": "808"} and r["reset"]["title"] == "kick (808)"
+    assert r["reset"]["muted"] == 0  # the snare muted earlier is back too

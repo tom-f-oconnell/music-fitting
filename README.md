@@ -40,7 +40,9 @@ Then open http://localhost:43153.
 * **Tweak:** every patch parameter has a slider, which marks the fitted
   value; hover over it to see what it does, and double-click to reset it.
   Changes re-render within a second. Click a note or a drum hit to mute it.
-  The drums stay in every re-render unless you tick *Mute drums & noise*.
+  The *Drums* box below has the same for each drum that was hit: which kit's
+  version it plays, its level, tuning and decay (the generic sounds have their
+  own). The drums stay in every re-render unless you tick *Mute drums & noise*.
 * **Mono lead or acid line:** under Advanced, this also fits slides between
   notes and more harmonics, and takes about two-thirds longer.
 * **Play:** the box below the patch plays it live, with the mouse or your computer
@@ -134,8 +136,11 @@ last two only if `tools` in `/api/specs` says they are installed),
 `POST /api/library/downloads` (`{preset}` or `{source, query, name, limit}`),
 `POST /api/library/downloads/{id}/cancel`,
 `DELETE /api/jobs/{id}` (stops it first if it's queued or running), `GET /api/jobs/{id}/audio/{target|fit}.wav`,
-`POST /api/jobs/{id}/render` (`{patches, notes, muted_voices, drum_hits}` → WAV, loss in
-the `X-Spectral-Loss` header; `drum_hits` as `[drum index, time, strength]`), `POST /api/midi`
+`POST /api/jobs/{id}/render` (`{patches, notes, muted_voices, mute_noise, muted_drum_hits,
+drum_settings}` → WAV, loss in the `X-Spectral-Loss` header; `muted_drum_hits` as `[drum index,
+time]` of fitted hits, `drum_settings` one `{level, tune, decay, kit}` per drum, as in the job's
+`drums`, or the generic sounds' settings; `drum_hits` as `[drum index, time, strength]` plays
+those hits instead of the fitted drums), `POST /api/midi`
 (`{notes, drum_hits}` → .mid, `drum_hits` as `[General MIDI note, time, strength]`).
 
 **Dataset from YouTube:**

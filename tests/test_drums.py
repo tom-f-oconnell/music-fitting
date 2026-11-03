@@ -146,3 +146,65 @@ def test_scoring_drum_hits():
     generic = score_drums(_hits(("drum 1", 0.0), ("drum 1", 1.5), ("drum 2", 0.5)), ref)
     assert generic["grouped"]["tp"] == 2 and generic["kick"]["tp"] == 1 and generic["snare"]["tp"] == 1
     assert score_drums([], ref)["any"]["f1"] == 0.0 and score_drums([], [])["any"]["f1"] == 0.0
+
+
+def test_hits_can_be_played_with_other_settings():
+    v = _voice()
+    v.commit()
+    fitted = v.describe()
+    kick = v.names.index("kick")
+    hits = [(kick, 0.1, 1.0)]
+    base = v.render_hits(hits, SR)
+    level = fitted[kick]["level"]
+    louder = [{}] * len(v.names)
+    louder[kick] = {"level": 2 * level}
+    assert torch.allclose(v.render_hits(hits, SR, settings=louder), 2 * base, atol=1e-5)
+    # the other kit's kick, as if the fit had chosen it
+    other = "909" if fitted[kick]["kit"] == "808" else "808"
+    switched = [{}] * len(v.names)
+    switched[kick] = {"kit": other}
+    with torch.no_grad():
+        v2 = _voice()
+        v2.kit_logits[kick] = torch.tensor([0.0, 10.0] if other == "909" else [10.0, 0.0])
+        v2.commit()
+        v2.raw.load_state_dict(v.raw.state_dict())
+    assert torch.allclose(v.render_hits(hits, SR, settings=switched), v2.render_hits(hits, SR), atol=1e-5)
+    # tuned up an octave, the sample plays twice as fast
+    up = [{}] * len(v.names)
+    up[kick] = {"tune": 12.0}
+    tuned = v.render_hits(hits, SR, settings=up)
+    assert float((tuned[int(0.6 * SR):] ** 2).sum()) < 0.5 * float((base[int(0.6 * SR):] ** 2).sum())
+    # out of range is clamped, nonsense ignored, and the voice itself unchanged
+    wild = [{}] * len(v.names)
+    wild[kick] = {"level": 1e6, "decay": "loud", "kit": "TR-1000"}
+    top = [{}] * len(v.names)
+    top[kick] = {"level": 2.0}
+    assert torch.allclose(v.render_hits(hits, SR, settings=wild), v.render_hits(hits, SR, settings=top))
+    assert v.describe() == fitted and fitted[kick]["kits"] == ["808", "909"]
+
+
+def test_the_generic_voice_can_be_played_with_other_settings():
+    v = NoiseVoice(100, 0.01, SR, 3, generator=torch.Generator().manual_seed(0))
+    d = v.describe()
+    assert set(NoiseVoice.SETTINGS) <= set(d[0]) and d[0]["kit"] == ""
+    hits = [(1, 0.1, 1.0)]
+    quieter = [{}, {"level": d[1]["level"] / 4}, {}]
+    assert torch.allclose(v.render_hits(hits, SR, False, quieter), v.render_hits(hits, SR, False) / 4, atol=1e-6)
+
+
+def test_the_fitted_drums_play_back_whole_with_hits_muted():
+    v = _voice()
+    v.commit()
+    snare, clap, kick = (v.names.index(n) for n in ("snare", "clap", "kick"))
+    with torch.no_grad():
+        v.logits.fill_(-30.0)
+        v.logits[kick, 20] = v.logits[snare, 50] = 30.0
+        v.logits[clap, 51] = 0.0  # a weaker layer of the same snare, which hits() merges away
+        v.logits[kick, 70] = -1.0  # too weak to be a hit, but still part of the sound
+        hits = v.hits()
+        assert [(v.names[k], round(t, 2)) for k, t, _ in hits] == [("kick", 0.2), ("snare", 0.5)]
+        assert torch.allclose(v.render_fitted(SR), v.render(SR), atol=1e-6)
+        assert not torch.allclose(v.render_hits(hits, SR), v.render(SR), atol=1e-3)  # the hits alone miss some
+        muted = v.render_fitted(SR, muted=[(snare, 0.5)])
+        v.logits[snare, 50] = v.logits[clap, 51] = -30.0
+        assert torch.allclose(muted, v.render(SR), atol=1e-4)  # the snare went, and its clap layer with it

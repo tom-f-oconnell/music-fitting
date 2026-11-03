@@ -521,7 +521,12 @@ General MIDI drums.
 * **One hit per group.** The fit often builds one real snare from its snare, clap and rim at
   once. Hits keep only the strongest drum of each group (kick; snare, rim and clap; hats; toms;
   cymbal; cowbell) within 50 ms: on the stems below, F1 0.481 → 0.557 and the snare's 0.36 →
-  0.59. The fitted audio keeps every layer; replayed hits lose the weaker ones.
+  0.59. The fitted audio keeps every layer.
+* **Edits start from the whole roll, not the hits.** The hits hold only part of the roll (half
+  its mass on a Demucs drum stem of Cornish Acid), and the rest is sound too: replaying just
+  the hits scored 3.49 against the fit's 1.95 there, and still 2.28 with every peak above 0.02.
+  So the web app re-renders the fitted roll (`render_fitted`) with the drums' sliders applied to
+  their sounds, and muting a hit silences the roll around it, with the layers merged into it.
 
 **Scoring** (`eval_slakh.py --drums`, `slakh.score_drums`). Hits match true hits one to one
 within 50 ms, ignoring the drum ("any") or requiring its group ("grouped"). The generic voice's
@@ -728,7 +733,7 @@ members that land outside the destination. There is deliberately no delete butto
   but all go to one voice (see "Pretrained tools").
 * Drums: the kits are synthesised, so real drums are matched only roughly; toms are found
   where there are none, rides and other percussion aren't in the kits, and Demucs loses most
-  hats (see "Drums"). The web app has no sliders for a drum's level, tuning or decay.
+  hats (see "Drums").
 * Echoes are still partly explained as notes (see above); the delay effect
   needs a better way back once it has been turned down.
 * High-resonance patches are fitted badly.
