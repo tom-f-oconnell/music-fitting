@@ -256,6 +256,8 @@ def _kit_707(sr: int) -> dict[str, np.ndarray]:
 
 BUILT_IN = {"808": _kit_808, "909": _kit_909, "606": _kit_606, "cr78": _kit_cr78, "linndrum": _kit_linndrum,
             "dmx": _kit_dmx, "707": _kit_707}
+# the kits a fit uses unless told otherwise, each drum taking whichever version fits it best (design.md)
+DEFAULT_KITS = "808,909,606,cr78,linndrum,dmx,707"
 # what the web app calls them
 BUILT_IN_NAMES = {"808": "TR-808", "909": "TR-909", "606": "TR-606", "cr78": "CR-78", "linndrum": "LinnDrum (imitation)",
                   "dmx": "Oberheim DMX (imitation)", "707": "TR-707 (imitation)"}

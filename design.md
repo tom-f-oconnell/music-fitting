@@ -509,11 +509,21 @@ makes of them (`NoiseVoice`, still there as `drum_kit="noise"`). The default (`K
 plays named drums from drum machine kits, so hits can be played back, edited, and exported as
 General MIDI drums.
 
-* **Kits.** `drumkit.py` makes TR-808 and TR-909 style kits from what is known of the
-  circuits: pitch-swept decaying sines for kicks and toms, the 808's six square waves at fixed
-  inharmonic frequencies for its hats, cymbal and cowbell, filtered noise for snares and noise
-  bursts for claps. Nothing has to be downloaded or licensed, but they aren't recordings, so
-  even a real 808 won't match exactly. A folder of samples named after their drums is a kit too.
+* **Kits.** `drumkit.py` makes the analogue machines (TR-808, TR-909, TR-606, CR-78) from what
+  is known of their circuits: pitch-swept decaying sines for kicks, toms and congas, banks of
+  square waves at fixed inharmonic frequencies for metal, filtered noise for snares, shakers and
+  hats, and noise bursts for claps and tambourines. Nothing has to be downloaded or licensed, but
+  they aren't recordings, so even a real 808 won't match exactly. The LinnDrum, Oberheim DMX and
+  TR-707 played recordings of real drums, which can't be made from a circuit or shipped, so
+  their kits are imitations: acoustic-style drums made from scratch (membrane modes, wires,
+  random inharmonic partials for cymbals), with the drums each machine had, stored as it stored
+  them (8-bit µ-law for the first two, 6-bit for the 707). Real samples of them, if you have
+  some, go in `data/drumkits/<name>/`. Two freely licensed recorded kits come from the Data menu
+  (`dataset/drumkits.py`): the Salamander Drumkit, read from its overhead microphones, one forte
+  take per drum, and DRSKit, read as DrumGizmo lays it out, a hit three quarters of the way up
+  its velocity layers with all 13 microphones summed. Each is read once and cached as one sound
+  per drum. A kit has up to 17 drums: kick, rim, snare, clap, closed and open hat, three toms,
+  crash, ride, cowbell, tambourine, shaker, conga, bongo, claves.
 * **A kit per drum.** While the roll is fitted, each drum is a softmax mix of the kits'
   versions, so gradients can choose; before stage 2, `commit()` keeps the heavier one. Each
   drum also gets a level, a tuning (±12 semitones, by reading the sample at a continuous rate,
@@ -537,7 +547,8 @@ machine sounds: the 20 usual 4 s windows hold 521 hits, 172 of them hats, 91 kic
 that no kit here has. So "any" is generous: the fitted hits moved to random times still score
 0.27.
 
-On the **true drum stems** (`--drum-stem`, perfect separation), the 20 windows:
+On the **true drum stems** (`--drum-stem`, perfect separation), the 20 windows, with the 808 and 909 (the only kits
+at the time; see "Which kits"):
 
 | | any | grouped | kick | snare | hat |
 |---|---|---|---|---|---|
@@ -590,6 +601,56 @@ the true stem scores 0.39) and grouped F1 from 0.344 to 0.395 (+0.030 ± 0.029; 
 are about the same (hats +0.20 ± 0.09, snares −0.07 ± 0.04); 2–3 kHz crossovers are worse. Not
 adopted yet: the crossover was chosen on these windows, and the other stems' top end would
 have to leave the notes' target. Scripts and results are outside the repository.
+
+**Which kits.** Drums alone with each kit and some mixtures (`eval_out/kits/`, outside the
+repository): grouped F1 on the 20 windows' true and Demucs drum stems, and the loss on 14 real
+clips' Demucs drum stems (Aphex Twin, separated at 44.1 kHz; no true hits there), paired against
+808 + 909 (± standard error over clips):
+
+| kits | true stems | Demucs stems | real clips: loss |
+|---|---|---|---|
+| 808 + 909 (the default until now) | 0.395 | 0.313 | 1.402 |
+| TR-808 | 0.384 | 0.357 (+0.032 ± 0.011) | +0.027 ± 0.010 |
+| TR-909 | 0.350 | 0.282 | +0.091 ± 0.014 |
+| TR-606 | 0.388 | 0.323 | +0.059 ± 0.033 |
+| CR-78 | 0.410 | 0.333 | +0.022 ± 0.027 |
+| LinnDrum (imitation) | 0.379 | 0.307 | +0.061 ± 0.021 |
+| Oberheim DMX (imitation) | 0.335 | 0.282 | +0.127 ± 0.024 |
+| TR-707 (imitation) | 0.365 | 0.327 | +0.091 ± 0.032 |
+| Salamander | 0.405 | 0.312 | +0.124 ± 0.032 |
+| DRSKit | 0.352 | 0.276 | +0.290 ± 0.043 |
+| Salamander + DRSKit | 0.396 | 0.316 | +0.141 ± 0.039 |
+| the seven machines | 0.374 | 0.327 (+0.026 ± 0.011) | −0.056 ± 0.025 |
+| the seven machines + Salamander | 0.357 | 0.319 | −0.079 ± 0.026 |
+| all nine | 0.385 | 0.314 | −0.096 ± 0.026 |
+| generic sounds | (0.372) | (0.350) | −0.054 ± 0.021 |
+
+* **The kits find hits about equally well.** Most are within 0.03 of 808 + 909, with per-clip
+  standard errors of 0.01–0.02; the 909, the DMX imitation and DRSKit are worse on both kinds
+  of stem.
+* **The recorded kits don't earn a place in the default.** BabySlakh's drums are themselves
+  sampled acoustic kits, yet Salamander only ties 808 + 909 and DRSKit does worse; on Aphex Twin
+  both fit far worse than the machines. So downloading them doesn't change the default.
+* **More kits always lower the loss, not the errors.** Each drum mixing more kits has more ways
+  to fit, so all nine reach the lowest loss on real clips, but they find no more hits.
+* **Comparing kits by loss doesn't pick better ones.** Keeping each clip's lowest-loss single
+  kit scores 0.381 on true stems (−0.018 ± 0.013) and 0.343 on Demucs stems (+0.026 ± 0.012,
+  mostly the 808: 12 of 20 clips), no better than the best fixed choice. It stays an option for
+  hearing which kit suits a track (real clips' best single kit varies: the 808 on 4 of 14, the
+  606 and CR-78 on 3 each), not the default.
+
+**So the default is the seven machines, mixed per drum** (`DEFAULT_KITS`). Checked on the 47
+windows not used for choosing, against 808 + 909: grouped F1 +0.017 ± 0.014 on true stems and
++0.012 ± 0.017 on Demucs stems (hats 0.18 against 0.10). The 808 alone, the table's best on
+Demucs stems (+0.032 ± 0.011 there), managed −0.004 ± 0.013 and +0.010 ± 0.007: the table's
+leads are mostly the luck of picking the best of 15 on the same windows. With notes, on the 20
+mixes: note F1 +0.002 ± 0.005, drums −0.030 ± 0.020, loss +0.007 ± 0.017, and Cornish Acid keeps
+its 18 notes, so the extra pitched drums (congas, toms, claves, cowbells) don't take over. Hits
+are as good as before, within noise, real drums sound closer (−0.056 ± 0.025 on the real clips),
+and fits take as long (31 s for drums alone). The price is drums that are exactly one kit: a
+kick, snare and kick taken from the 808 and 909 come back with the snare as the 707's clap and
+an open hat (loss 1.071, against 0.733 with just those two kits ticked), as seven versions of
+every drum give stage 1 more places to settle. Ticking the right kit, or comparing, fixes that.
 
 **Alongside notes** (2 voices; drums join at `drum_start` 0.25 as before) cheap drums take
 over again. In the mix, kits at cost 0.2 find drums where the old voice found 1 hit of 521

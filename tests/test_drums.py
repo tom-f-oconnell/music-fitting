@@ -126,25 +126,43 @@ def test_hits_play_the_same_after_saving(tmp_path, make):
     assert torch.allclose(again.render_hits(hits[:1], SR), v.render_hits(hits[:1], SR), atol=1e-5)
 
 
-def test_a_drums_only_fit_finds_the_hits_and_the_kit():
+def _kick_snare_kick():
     kit = make_kit("808,909", SR)
     kick, snare = kit.samples[kit.names.index("kick"), 0], kit.samples[kit.names.index("snare"), 1]
     target = torch.zeros(SR)
     for t, sample in ((0.2, kick), (0.7, kick), (0.45, snare)):
         i = int(t * SR)
         target[i:] += 0.4 * sample[:SR - i]
+    return target
+
+
+def _drums_only(target, **kw):
     # drum_start is left at its default: with no voices the drums have to start at once. The default
     # hit cost suits real drums, which no kit here matches exactly; with an exact match, a higher
     # one finds just the true hits (design.md).
-    # (with 17 drums to choose from, 200 steps of stage 1 still build the snare out of a clap and an open hat)
-    res = fit(target, FitConfig(n_voices=0, roll_steps=400, note_steps=60, polish_steps=0, device="cpu", tuning_cents=0.0,
-                                log_every=1000, seed=1, drum_sparsity_alone=5.0), verbose=False)
+    return fit(target, FitConfig(n_voices=0, roll_steps=400, note_steps=60, polish_steps=0, device="cpu", tuning_cents=0.0,
+                                 log_every=1000, seed=1, drum_sparsity_alone=5.0, **kw), verbose=False)
+
+
+def test_a_drums_only_fit_finds_the_hits_and_the_kit():
+    res = _drums_only(_kick_snare_kick(), drum_kit="808,909")
     names = res.noise.names
     hits = {(names[k], round(t, 1)) for k, t, v in res.noise.hits() if v > 0.3}
     assert hits == {("kick", 0.2), ("kick", 0.7), ("snare", 0.4) if ("snare", 0.4) in hits else ("snare", 0.5)}
     chosen = {d["name"]: d["kit"] for d in res.noise.describe()}
     assert chosen["kick"] == "808" and chosen["snare"] == "909"
     assert res.notes == [] and res.audio.numel() == SR
+
+
+def test_the_default_kits_find_the_hits_if_not_always_the_exact_drum():
+    # with seven versions of every drum to choose from, this 909 snare comes out as another kit's
+    # clap and open hat (design.md); the kicks, and a snare-like hit where the snare is, still do
+    res = _drums_only(_kick_snare_kick())
+    names = res.noise.names
+    hits = [(names[k], t) for k, t, v in res.noise.hits() if v > 0.3]
+    assert [round(t, 1) for n, t in hits if n == "kick"] == [0.2, 0.7]
+    assert {d["name"]: d["kit"] for d in res.noise.describe()}["kick"] == "808"
+    assert any(GROUP[n] == "snare" and abs(t - 0.45) < 0.03 for n, t in hits)
 
 
 def test_drums_go_on_channel_ten(tmp_path):

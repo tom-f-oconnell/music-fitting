@@ -30,8 +30,8 @@ Then open http://localhost:43153.
   TR-606, CR-78, and imitations of the LinnDrum, Oberheim DMX and TR-707, which played
   recordings that can't be shipped), recorded acoustic kits once downloaded from the
   **Data** menu (Salamander, DRSKit), or the *generic* sounds the fit shapes itself,
-  which find hits but don't say which drum they are. With several ticked, each drum
-  plays whichever kit's version fits it best; with *Compare the kits*, each kit is
+  which find hits but don't say which drum they are. With several ticked (the seven
+  machines are, to begin with), each drum plays whichever kit's version fits it best; with *Compare the kits*, each kit is
   fitted to the drums on its own instead, the fit keeps the best, and the *Drums* box
   lists how each did, to listen to. Hover over a kit to see what it has. Fitting notes
   and drums together favours the notes, so it finds fewer drums than fitting drums

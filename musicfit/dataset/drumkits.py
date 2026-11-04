@@ -196,5 +196,11 @@ def catalogue(root: str | None = None) -> list[dict]:
 
 
 def default_kits(root: str | None = None) -> list[str]:
-    """The kits a fit uses unless told otherwise."""
-    return ["808", "909"]
+    """The kits a fit uses unless told otherwise: the drum machines, whatever is downloaded.
+
+    The recorded kits find hits no better on BabySlakh and fit electronic music far worse
+    (design.md), so having them doesn't change the default.
+    """
+    from ..drumkit import DEFAULT_KITS
+
+    return DEFAULT_KITS.split(",")

@@ -22,7 +22,7 @@ from typing import Callable
 import torch
 
 from .batching import backward_in_batches, render_mix
-from .drumkit import make_kit
+from .drumkit import DEFAULT_KITS, make_kit
 from .drums import KitVoice, NoiseVoice
 from .loss import MultiResolutionSTFTLoss
 from .notes import Note, NoteSequence, PianoRoll
@@ -53,9 +53,9 @@ class FitConfig:
     decode_threshold: float = 0.3
     # unpitched sounds (drums.py): drum hits from an onset roll, and a noise floor
     drum_kinds: int = 3  # 0: no drums; with drum_kit "noise", how many kinds of its own to make
-    # kits to fit the drums against, comma-separated: "808", "909" or a folder of samples (drumkit.py);
+    # kits to fit the drums against, comma-separated: built-in, downloaded or folders of samples (drumkit.py);
     # each drum keeps whichever fits it best. "noise": generic noise bursts instead (the drum voice before kits)
-    drum_kit: str = "808,909"
+    drum_kit: str = DEFAULT_KITS
     noise_floor: bool = False
     # multiplies `sparsity` for the drum roll (higher: fewer, stronger hits). Alongside notes, cheap drums take
     # over pitched sound (design.md); fitted alone (no voices, as in a Demucs drum stem) they can be cheaper
@@ -291,7 +291,7 @@ def fit(
     ]
     noise = None
     if cfg.drum_kinds and cfg.drum_kit != "noise":
-        noise = KitVoice(n_frames, cfg.frame_hop_s, cfg.sr, make_kit(cfg.drum_kit, cfg.sr), noise_floor=cfg.noise_floor,
+        noise = KitVoice(n_frames, cfg.frame_hop_s, cfg.sr, make_kit(str(cfg.drum_kit), cfg.sr), noise_floor=cfg.noise_floor,
                          generator=gen, seed=cfg.seed).to(device)
     elif cfg.drum_kinds or cfg.noise_floor:
         noise = NoiseVoice(n_frames, cfg.frame_hop_s, cfg.sr, cfg.drum_kinds, noise_floor=cfg.noise_floor,
